@@ -1,0 +1,1642 @@
+diff --git a/.gitignore b/.gitignore
+index f242b64..2c1a55e 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -8,6 +8,7 @@ venv/
+ .streamlit/
+ .config/
+ Library/
++data/price_cache/
+ *.db-journal
+ *.sqlite-journal
+ dist/
+diff --git a/README.md b/README.md
+index aa2c01c..db6926f 100644
+--- a/README.md
++++ b/README.md
+@@ -27,23 +27,26 @@ python -m pytest
+ - Stock Card with returns, moving averages, RSI, volume confirmation, themes, notes, and related assets.
+ - Trade Decision Board with transparent scoring and setup classification.
+ - Portfolio Risk page showing concentration warnings by theme and risk tag.
++- Validation Lab for horizon-specific signal tracking, hit-rate/base-rate comparison, and abnormal-return event study outputs.
+ - Local SQLite persistence.
+ - Seed data for an airline theme and AI infrastructure theme.
+ 
+ ## Current Limitations
+ 
+ - yfinance is used for prototype data only and can be delayed, incomplete, or unavailable.
++- yfinance price downloads use lightweight local caching, but this is prototype-only and not production-grade market data infrastructure.
+ - News and guidance are mocked placeholders in V1.
+ - Target zones and invalidation levels are placeholders for user process, not price recommendations.
+ - Macro regime rules are intentionally simple and should be treated as context, not forecasts.
++- Validation metrics are unstable until enough matured signals are collected.
+ 
+ ## Data Sources
+ 
+ - Market prices: yfinance prototype adapter.
++- Price cache: local pickle files under `data/price_cache/`, ignored by git.
+ - News: mocked local stub data.
+ - User watchlists and themes: local SQLite database.
+ 
+ ## Disclaimer
+ 
+ ThesisBoard is not financial advice. It is a personal research and decision-structuring tool. It does not recommend buying or selling securities and does not execute trades.
+-
+diff --git a/app.py b/app.py
+index 09512fd..b89da18 100644
+--- a/app.py
++++ b/app.py
+@@ -23,6 +23,8 @@ from src.news_stub import get_mock_news
+ from src.portfolio_risk import concentration_report
+ from src.related_assets import get_related_assets, grouped_related_assets
+ from src.scoring import score_setup
++from src.forward_tracker import get_signal_outcomes
++from src.signal_evaluator import calculate_validation_metrics
+ from src.ui_components import fmt_num, fmt_pct, metric_row, score_bars, table_from_records
+ 
+ 
+@@ -50,7 +52,7 @@ def main() -> None:
+     with st.sidebar:
+         page = st.radio(
+             "Workspace",
+-            ["My Universe", "Theme Workspace", "Macro Regime", "Stock Card", "Trade Decision Board", "Portfolio Risk"],
++            ["My Universe", "Theme Workspace", "Macro Regime", "Stock Card", "Trade Decision Board", "Portfolio Risk", "Validation Lab"],
+         )
+         if st.button("Refresh market data"):
+             clear_market_cache()
+@@ -68,6 +70,8 @@ def main() -> None:
+         trade_decision_page()
+     elif page == "Portfolio Risk":
+         portfolio_risk_page()
++    elif page == "Validation Lab":
++        validation_lab_page()
+ 
+ 
+ def my_universe_page() -> None:
+@@ -290,6 +294,71 @@ def portfolio_risk_page() -> None:
+         st.info("No concentration warnings based on current holdings.")
+ 
+ 
++def validation_lab_page() -> None:
++    st.header("Validation Lab")
++    st.warning("Metrics are unstable until enough matured signals are collected.")
++    st.warning("Daily data cannot establish precise intraday causality.")
++    st.warning("Hit rate must be interpreted relative to base rate.")
++
++    outcomes = get_signal_outcomes()
++    metrics = calculate_validation_metrics(outcomes) if outcomes else []
++    if not outcomes:
++        st.info("No signal snapshots have been recorded yet. Validation metrics will appear after signals are recorded and mature.")
++        return
++
++    cols = st.columns(3)
++    matured_count = sum(1 for item in outcomes if item.get("is_matured"))
++    cols[0].metric("Signal snapshots", len(outcomes))
++    cols[1].metric("Matured signals", matured_count)
++    cols[2].metric("Open signals", len(outcomes) - matured_count)
++
++    st.subheader("Hit Rate vs Base Rate")
++    table_from_records(
++        metrics,
++        [
++            "horizon_days",
++            "classification_at_creation",
++            "signal_count",
++            "matured_count",
++            "hit_rate",
++            "base_rate",
++            "excess_hit_rate",
++            "avg_forward_abnormal_return",
++            "false_positive_rate",
++            "false_negative_rate",
++        ],
++    )
++
++    st.subheader("Recent Signal Snapshots")
++    table_from_records(
++        outcomes[:25],
++        ["created_at", "ticker", "signal_type", "horizon_days", "classification_at_creation", "score_at_creation", "theme", "market_regime", "rule_version"],
++    )
++
++    st.subheader("Recent Matured Outcomes")
++    matured = [item for item in outcomes if item.get("is_matured")]
++    table_from_records(
++        matured[:25],
++        [
++            "ticker",
++            "classification_at_creation",
++            "horizon_days",
++            "forward_1d_abnormal_return",
++            "forward_3d_abnormal_return",
++            "forward_5d_abnormal_return",
++            "forward_20d_abnormal_return",
++            "max_drawdown_during_horizon",
++            "max_runup_during_horizon",
++            "hit",
++            "avoided_bad_trade",
++            "false_negative",
++        ],
++    )
++
++    st.subheader("Event Study Results")
++    st.info("Event-study rows will appear here once event reactions are recorded into the validation database.")
++
++
+ def _index_or_zero(options: list[str], value: str) -> int:
+     return options.index(value) if value in options else 0
+ 
+diff --git a/docs/data_dictionary.md b/docs/data_dictionary.md
+index 52259cd..69866cf 100644
+--- a/docs/data_dictionary.md
++++ b/docs/data_dictionary.md
+@@ -33,3 +33,72 @@
+ - `ticker`: Ticker foreign key.
+ - `risk_tag`: User-assigned risk label.
+ 
++## signal_snapshots
++
++- `signal_id`: Unique signal identifier.
++- `created_at`: UTC timestamp when the signal was recorded.
++- `ticker`: Signal ticker.
++- `signal_type`: event_reaction, trade_setup, theme_thesis, technical_extension, or basket_confirmation.
++- `horizon_days`: Validation horizon.
++- `classification_at_creation`: Original classification.
++- `score_at_creation`: Original score.
++- `price_at_creation`: Ticker price when recorded.
++- `benchmark_at_creation`: Benchmark price when recorded.
++- `sector_proxy`: Sector or theme proxy.
++- `market_regime`: Macro regime at creation.
++- `theme`: Associated theme.
++- `basket`: JSON basket members.
++- `evidence_json`: JSON evidence snapshot.
++- `rule_version`: Reproducible rule version.
++- `model_version`: Optional model version.
++
++## signal_outcomes
++
++- `signal_id`: Signal foreign key.
++- `evaluated_at`: UTC timestamp when evaluated.
++- `is_matured`: Whether the forward horizon has matured.
++- `forward_*_return`: Forward raw returns by horizon.
++- `forward_*_abnormal_return`: Forward abnormal returns by horizon.
++- `max_drawdown_during_horizon`: Worst return during the horizon.
++- `max_runup_during_horizon`: Best return during the horizon.
++- `hit`: Bullish hit flag.
++- `avoided_bad_trade`: Avoid/Avoid Chase outcome flag.
++- `false_negative`: Avoid/Avoid Chase false negative flag.
++- `data_quality_flag`: Outcome data quality.
++
++## event_studies
++
++- `ticker`: Event ticker.
++- `event_date`: Event date.
++- `event_timestamp`: Optional precise timestamp.
++- `catalyst_type`: Event catalyst type.
++- `sentiment`: positive, neutral, or negative.
++- `benchmark`: Market benchmark.
++- `sector_proxy`: Optional sector/theme proxy.
++- `horizon_days`: Event reaction horizon.
++- `raw_return`: Ticker raw return.
++- `beta_adjusted_return`: Beta-adjusted abnormal return.
++- `sector_adjusted_return`: Sector-adjusted return.
++- `combined_abnormal_return`: Combined abnormal return.
++- `volume_reaction`: Volume ratio reaction.
++- `reaction_label`: Rule-based event reaction label.
++- `causality_confidence`: low or medium causality confidence.
++- `data_quality_flag`: Event-study data quality.
++
++## validation_metrics
++
++- `horizon_days`: Validation horizon.
++- `classification`: Classification cohort.
++- `theme`: Optional theme cohort.
++- `market_regime`: Macro regime cohort.
++- `signal_count`: Signal count.
++- `matured_count`: Matured signal count.
++- `hit_rate`: Classification hit rate.
++- `base_rate`: Same-universe base rate.
++- `excess_hit_rate`: Hit rate minus base rate.
++- `avg_forward_abnormal_return`: Average forward abnormal return.
++- `median_forward_abnormal_return`: Median forward abnormal return.
++- `avg_max_drawdown`: Average max drawdown.
++- `false_positive_rate`: False positive rate.
++- `false_negative_rate`: False negative rate.
++- `rule_version`: Rule version.
+diff --git a/docs/decision_log.md b/docs/decision_log.md
+index 22ed661..fcb18f4 100644
+--- a/docs/decision_log.md
++++ b/docs/decision_log.md
+@@ -6,3 +6,4 @@
+ - Kept all paid data providers out of the default dependency path.
+ - Stored related asset mappings in code for V1 with a clear future path to user editing.
+ - Built scoring as transparent checklist logic and explicitly avoided direct buy/sell language.
++- Paused broader news/agent expansion to build validation spine first. Reason: without forward-return tracking, thesis validation risks becoming persuasive but untested narrative generation.
+diff --git a/docs/product_spec.md b/docs/product_spec.md
+index 14be4b5..21c1787 100644
+--- a/docs/product_spec.md
++++ b/docs/product_spec.md
+@@ -12,6 +12,7 @@ ThesisBoard helps an individual investor or trader structure thematic market thi
+ - As a user, I can open a stock card that summarizes technical, theme, and related-asset context.
+ - As a user, I can see a trade setup classification that avoids direct buy/sell language.
+ - As a user, I can monitor portfolio overlap when holdings cluster in one theme or risk tag.
++- As a user, I can evaluate whether thesis validations and trade classifications worked against forward abnormal returns.
+ 
+ ## MVP Scope
+ 
+@@ -22,6 +23,7 @@ ThesisBoard helps an individual investor or trader structure thematic market thi
+ - Related asset mappings stored in code for V1.
+ - Mock news and guidance structures.
+ - Portfolio concentration warnings.
++- Validation spine with horizon definitions, event studies, signal snapshots, matured outcomes, hit-rate metrics, and base-rate comparison.
+ 
+ ## Non-Goals
+ 
+@@ -30,4 +32,4 @@ ThesisBoard helps an individual investor or trader structure thematic market thi
+ - Paid data API dependency.
+ - AI-only narrative classification.
+ - Direct financial advice.
+-
++- Predictive-power claims before enough matured validation data exists.
+diff --git a/docs/roadmap.md b/docs/roadmap.md
+index 7182622..52af2d7 100644
+--- a/docs/roadmap.md
++++ b/docs/roadmap.md
+@@ -6,6 +6,7 @@
+ - SQLite storage.
+ - yfinance prototype adapter.
+ - Stock cards, related assets, theme aggregation, macro regime, scoring, and portfolio risk.
++- Validation spine for abnormal returns, event studies, signal snapshots, matured outcomes, hit rates, and base-rate comparisons.
+ 
+ ## V2
+ 
+@@ -14,6 +15,7 @@
+ - FRED macro adapter.
+ - SEC EDGAR guidance and filing links.
+ - Saved score snapshots and decision journal.
++- User-editable validation rules and richer validation cohorts after enough matured signal history exists.
+ 
+ ## V3
+ 
+@@ -22,4 +24,3 @@
+ - Scenario analysis.
+ - Multiple data vendor adapters.
+ - More advanced breadth, factor, and risk models.
+-
+diff --git a/docs/scoring_methodology.md b/docs/scoring_methodology.md
+index 0b2426b..dd8b3dd 100644
+--- a/docs/scoring_methodology.md
++++ b/docs/scoring_methodology.md
+@@ -23,3 +23,8 @@ Total score is the sum of positive components plus the negative risk penalty.
+ 
+ The score is not a buy/sell recommendation. It is a checklist compression tool that helps identify whether a setup deserves more attention, confirmation, or avoidance. Users remain responsible for position sizing, risk management, and trade decisions.
+ 
++## Validation Spine
++
++Scores and classifications should be recorded as signal snapshots before they are treated as useful. Matured outcomes compare future abnormal returns against the classification and horizon. Hit rate must be interpreted relative to a same-universe base rate.
++
++Raw returns alone are not enough to validate a setup. Event reactions and forward returns should use beta-adjusted and, when available, sector/theme-adjusted abnormal returns.
+diff --git a/docs/validation_methodology.md b/docs/validation_methodology.md
+new file mode 100644
+index 0000000..aa434e4
+--- /dev/null
++++ b/docs/validation_methodology.md
+@@ -0,0 +1,68 @@
++# Validation Methodology
++
++## Why Raw Return Is Insufficient
++
++Raw stock returns do not prove that a thesis, event, or setup was validated. A stock can rise because the whole market rose, because its sector moved, or because beta amplified a benchmark move. ThesisBoard therefore treats raw return as an input, not as validation by itself.
++
++## Abnormal Return Methodology
++
++The MVP calculates abnormal return by adjusting ticker return for market and, when available, sector or theme proxy movement.
++
++Default formula:
++
++```text
++abnormal_return = ticker_return - beta * market_return
++```
++
++When a sector or theme proxy is available:
++
++```text
++abnormal_return = ticker_return - 0.5 * beta * market_return - 0.5 * sector_proxy_return
++```
++
++SPY is the default market benchmark. Theme proxies include SMH for semiconductors, JETS for airlines, XLE for energy, XLY for consumer cyclicals, XLU for utilities and power, IGV for enterprise software, and BTC-USD for crypto infrastructure.
++
++## Beta-Adjusted Return
++
++Rolling beta is estimated from ticker and benchmark returns. If there is insufficient history, the MVP falls back to beta of 1.0 and marks the data quality accordingly where applicable.
++
++## Sector and Theme Proxy Adjustment
++
++Sector proxies reduce the risk of calling a ticker-specific move validated when the whole theme moved. If the proxy is missing, the system falls back to SPY-only abnormal return and records a missing proxy flag.
++
++## Event Study Limits
++
++Event studies are horizon-specific. ThesisBoard supports 1D immediate reaction and 3D event digestion horizons for event reactions. Daily data can show whether abnormal return followed an event date, but it cannot prove intraday causal ordering.
++
++## Timestamp Limits
++
++If an event timestamp is missing or only date-level, the system sets causality confidence to low and adds this guardrail: daily data cannot establish intraday causal ordering.
++
++## Horizon Definitions
++
++- 1D: immediate event reaction
++- 3D: short event digestion
++- 5D: swing setup validation
++- 20D: theme thesis validation
++- 60D: broader trend context
++
++A thesis should not collapse all horizons into one label. It can be confirmed on a 1D event reaction, unconfirmed on a 5D forward return, and still open on a 20D theme horizon.
++
++## Forward-Return Tracking
++
++Signal snapshots store the original classification, score, price, benchmark, sector proxy, market regime, theme, basket, evidence, and rule version. Matured outcomes later record forward returns, abnormal returns, drawdown, runup, hit status, avoided bad trade, and false negative flags.
++
++## Hit Rate and Base Rate
++
++Hit rate is not meaningful without base rate. ThesisBoard compares classification hit rate against the same universe and horizon base rate. If Tradeable 5D hit rate is 56% and base rate is 51%, the excess hit rate is +5 percentage points.
++
++Avoid and Avoid Chase outcomes are tracked separately from bullish classifications. Avoided bad trades and false negatives are not mixed into Tradeable hit-rate.
++
++## What The System Can Claim
++
++ThesisBoard can claim that a rule produced a recorded signal, that a future horizon matured, and that abnormal forward return met or failed the rule's hit definition.
++
++## What The System Cannot Claim
++
++ThesisBoard cannot claim predictive power before enough matured signals exist. It cannot claim causal intraday ordering from daily data. It cannot treat persuasive thesis text as validated unless the signal is tracked against future abnormal returns.
++
+diff --git a/src/abnormal_returns.py b/src/abnormal_returns.py
+new file mode 100644
+index 0000000..02038af
+--- /dev/null
++++ b/src/abnormal_returns.py
+@@ -0,0 +1,160 @@
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import date
++
++import pandas as pd
++
++
++THEME_PROXY_MAP = {
++    "AI Infrastructure": "SMH",
++    "Semiconductor": "SMH",
++    "Airlines": "JETS",
++    "Travel Rebound": "JETS",
++    "Cybersecurity": "HACK",
++    "Energy": "XLE",
++    "Consumer Cyclical": "XLY",
++    "Utilities": "XLU",
++    "Power": "XLU",
++    "Enterprise Software": "IGV",
++    "Crypto Infrastructure": "BTC-USD",
++}
++
++
++@dataclass
++class AbnormalReturnResult:
++    raw_return: float | None
++    market_return: float | None
++    beta: float | None
++    beta_adjusted_return: float | None
++    sector_proxy: str | None
++    sector_proxy_return: float | None
++    combined_abnormal_return: float | None
++    calculation_method: str
++    data_quality_flag: str
++
++    def as_dict(self) -> dict:
++        return self.__dict__.copy()
++
++
++def calculate_raw_return(price_series: pd.Series, start_date, end_date) -> float | None:
++    prices = _clean_price_series(price_series)
++    if prices.empty:
++        return None
++    start_price = _price_on_or_after(prices, start_date)
++    end_price = _price_on_or_before(prices, end_date)
++    if start_price is None or end_price is None or start_price == 0:
++        return None
++    return float((end_price / start_price) - 1)
++
++
++def estimate_rolling_beta(
++    ticker_returns: pd.Series,
++    benchmark_returns: pd.Series,
++    lookback_days: int = 120,
++) -> float | None:
++    joined = pd.concat([ticker_returns, benchmark_returns], axis=1, join="inner").dropna()
++    if len(joined) < max(20, min(lookback_days, 60)):
++        return None
++    joined = joined.tail(lookback_days)
++    benchmark = joined.iloc[:, 1]
++    variance = benchmark.var()
++    if variance == 0 or pd.isna(variance):
++        return None
++    return float(joined.iloc[:, 0].cov(benchmark) / variance)
++
++
++def calculate_market_adjusted_return(ticker_return: float, market_return: float) -> float:
++    return float(ticker_return - market_return)
++
++
++def calculate_beta_adjusted_return(ticker_return: float, beta: float, market_return: float) -> float:
++    return float(ticker_return - beta * market_return)
++
++
++def calculate_sector_adjusted_return(ticker_return: float, sector_or_theme_proxy_return: float) -> float:
++    return float(ticker_return - sector_or_theme_proxy_return)
++
++
++def calculate_combined_abnormal_return(
++    ticker_return: float,
++    beta: float,
++    market_return: float,
++    sector_proxy_return: float | None = None,
++    sector_weight: float = 0.5,
++) -> float:
++    if sector_proxy_return is None:
++        return calculate_beta_adjusted_return(ticker_return, beta, market_return)
++    market_weight = 1 - sector_weight
++    return float(ticker_return - market_weight * beta * market_return - sector_weight * sector_proxy_return)
++
++
++def abnormal_return_summary(
++    ticker_prices: pd.Series,
++    benchmark_prices: pd.Series,
++    start_date,
++    end_date,
++    sector_proxy: str | None = None,
++    sector_proxy_prices: pd.Series | None = None,
++    beta_lookback_days: int = 120,
++) -> dict:
++    raw_return = calculate_raw_return(ticker_prices, start_date, end_date)
++    market_return = calculate_raw_return(benchmark_prices, start_date, end_date)
++    if raw_return is None:
++        return AbnormalReturnResult(None, market_return, None, None, sector_proxy, None, None, "unavailable", "insufficient_price_history").as_dict()
++    if market_return is None:
++        return AbnormalReturnResult(raw_return, None, None, None, sector_proxy, None, None, "unavailable", "missing_benchmark_data").as_dict()
++
++    ticker_returns = _clean_price_series(ticker_prices).pct_change()
++    benchmark_returns = _clean_price_series(benchmark_prices).pct_change()
++    beta = estimate_rolling_beta(ticker_returns, benchmark_returns, beta_lookback_days)
++    if beta is None:
++        beta = 1.0
++
++    sector_return = None
++    data_quality = "ok"
++    if sector_proxy_prices is not None:
++        sector_return = calculate_raw_return(sector_proxy_prices, start_date, end_date)
++    if sector_proxy and sector_return is None:
++        data_quality = "missing_sector_proxy"
++
++    beta_adjusted = calculate_beta_adjusted_return(raw_return, beta, market_return)
++    combined = calculate_combined_abnormal_return(raw_return, beta, market_return, sector_return)
++    method = "beta_and_sector_adjusted" if sector_return is not None else "beta_adjusted_spy_only"
++    return AbnormalReturnResult(raw_return, market_return, beta, beta_adjusted, sector_proxy, sector_return, combined, method, data_quality).as_dict()
++
++
++def default_sector_proxy(theme: str | None) -> str | None:
++    if not theme:
++        return None
++    for key, proxy in THEME_PROXY_MAP.items():
++        if key.lower() in theme.lower():
++            return proxy
++    return None
++
++
++def _clean_price_series(price_series: pd.Series) -> pd.Series:
++    series = pd.Series(price_series).dropna()
++    if not isinstance(series.index, pd.DatetimeIndex):
++        series.index = pd.to_datetime(series.index)
++    return series.sort_index()
++
++
++def _price_on_or_after(prices: pd.Series, value: date | str):
++    timestamp = _normalize_timestamp_for_index(pd.Timestamp(value), prices.index)
++    candidates = prices.loc[prices.index >= timestamp]
++    return None if candidates.empty else float(candidates.iloc[0])
++
++
++def _price_on_or_before(prices: pd.Series, value: date | str):
++    timestamp = _normalize_timestamp_for_index(pd.Timestamp(value), prices.index)
++    candidates = prices.loc[prices.index <= timestamp]
++    return None if candidates.empty else float(candidates.iloc[-1])
++
++
++def _normalize_timestamp_for_index(timestamp: pd.Timestamp, index: pd.Index) -> pd.Timestamp:
++    if isinstance(index, pd.DatetimeIndex) and index.tz is None and timestamp.tzinfo is not None:
++        return timestamp.tz_convert(None)
++    if isinstance(index, pd.DatetimeIndex) and index.tz is not None and timestamp.tzinfo is None:
++        return timestamp.tz_localize(index.tz)
++    return timestamp
+diff --git a/src/config.py b/src/config.py
+index c500092..ca266ae 100644
+--- a/src/config.py
++++ b/src/config.py
+@@ -4,6 +4,6 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
+ DATA_DIR = ROOT_DIR / "data"
+ DB_PATH = DATA_DIR / "thesisboard.db"
+ SEED_WATCHLISTS_PATH = DATA_DIR / "seed_watchlists.json"
++PRICE_CACHE_DIR = DATA_DIR / "price_cache"
+ 
+ DEFAULT_MARKET_PROXIES = ["SPY", "QQQ", "IWM", "^VIX", "TLT", "DX-Y.NYB", "USO", "XLE", "SMH", "JETS"]
+-
+diff --git a/src/database.py b/src/database.py
+index e8c7df5..c531225 100644
+--- a/src/database.py
++++ b/src/database.py
+@@ -66,6 +66,87 @@ def init_database(db_path: Path | str = DB_PATH) -> None:
+                 risk_tag TEXT NOT NULL,
+                 PRIMARY KEY (ticker, risk_tag)
+             );
++
++            CREATE TABLE IF NOT EXISTS signal_snapshots (
++                signal_id TEXT PRIMARY KEY,
++                created_at TEXT NOT NULL,
++                ticker TEXT NOT NULL,
++                signal_type TEXT NOT NULL,
++                horizon_days INTEGER NOT NULL,
++                thesis_or_event_id TEXT,
++                classification_at_creation TEXT NOT NULL,
++                score_at_creation REAL,
++                price_at_creation REAL,
++                benchmark_at_creation REAL,
++                sector_proxy TEXT,
++                market_regime TEXT,
++                theme TEXT,
++                basket TEXT,
++                evidence_json TEXT,
++                rule_version TEXT NOT NULL,
++                model_version TEXT
++            );
++
++            CREATE TABLE IF NOT EXISTS signal_outcomes (
++                outcome_id INTEGER PRIMARY KEY AUTOINCREMENT,
++                signal_id TEXT NOT NULL UNIQUE REFERENCES signal_snapshots(signal_id) ON DELETE CASCADE,
++                evaluated_at TEXT NOT NULL,
++                is_matured INTEGER NOT NULL DEFAULT 0,
++                forward_1d_return REAL,
++                forward_3d_return REAL,
++                forward_5d_return REAL,
++                forward_20d_return REAL,
++                forward_1d_abnormal_return REAL,
++                forward_3d_abnormal_return REAL,
++                forward_5d_abnormal_return REAL,
++                forward_20d_abnormal_return REAL,
++                max_drawdown_during_horizon REAL,
++                max_runup_during_horizon REAL,
++                hit INTEGER,
++                avoided_bad_trade INTEGER,
++                false_negative INTEGER,
++                data_quality_flag TEXT DEFAULT 'ok'
++            );
++
++            CREATE TABLE IF NOT EXISTS event_studies (
++                event_study_id INTEGER PRIMARY KEY AUTOINCREMENT,
++                ticker TEXT NOT NULL,
++                event_date TEXT NOT NULL,
++                event_timestamp TEXT,
++                catalyst_type TEXT,
++                sentiment TEXT,
++                benchmark TEXT,
++                sector_proxy TEXT,
++                horizon_days INTEGER NOT NULL,
++                raw_return REAL,
++                beta_adjusted_return REAL,
++                sector_adjusted_return REAL,
++                combined_abnormal_return REAL,
++                volume_reaction REAL,
++                reaction_label TEXT,
++                causality_confidence TEXT,
++                data_quality_flag TEXT
++            );
++
++            CREATE TABLE IF NOT EXISTS validation_metrics (
++                metric_id INTEGER PRIMARY KEY AUTOINCREMENT,
++                calculated_at TEXT NOT NULL,
++                horizon_days INTEGER,
++                classification TEXT,
++                theme TEXT,
++                market_regime TEXT,
++                signal_count INTEGER,
++                matured_count INTEGER,
++                hit_rate REAL,
++                base_rate REAL,
++                excess_hit_rate REAL,
++                avg_forward_abnormal_return REAL,
++                median_forward_abnormal_return REAL,
++                avg_max_drawdown REAL,
++                false_positive_rate REAL,
++                false_negative_rate REAL,
++                rule_version TEXT
++            );
+             """
+         )
+ 
+diff --git a/src/event_study.py b/src/event_study.py
+new file mode 100644
+index 0000000..94ce080
+--- /dev/null
++++ b/src/event_study.py
+@@ -0,0 +1,127 @@
++from __future__ import annotations
++
++from datetime import datetime, timedelta
++
++import pandas as pd
++
++from .abnormal_returns import abnormal_return_summary, calculate_raw_return
++from .horizons import EVENT_REACTION_HORIZONS
++
++
++def run_event_study(
++    ticker: str,
++    event_date,
++    catalyst_type: str,
++    sentiment: str,
++    ticker_prices: pd.Series,
++    benchmark_prices: pd.Series,
++    event_timestamp: datetime | None = None,
++    benchmark: str = "SPY",
++    sector_proxy: str | None = None,
++    sector_proxy_prices: pd.Series | None = None,
++    peer_basket_prices: dict[str, pd.Series] | None = None,
++    volume_series: pd.Series | None = None,
++    horizons: list[int] | None = None,
++) -> list[dict]:
++    horizons = horizons or EVENT_REACTION_HORIZONS
++    results = []
++    for horizon in horizons:
++        end_date = pd.Timestamp(event_date) + timedelta(days=horizon)
++        abnormal = abnormal_return_summary(
++            ticker_prices,
++            benchmark_prices,
++            event_date,
++            end_date,
++            sector_proxy=sector_proxy,
++            sector_proxy_prices=sector_proxy_prices,
++        )
++        sector_adjusted = None
++        if abnormal["sector_proxy_return"] is not None and abnormal["raw_return"] is not None:
++            sector_adjusted = abnormal["raw_return"] - abnormal["sector_proxy_return"]
++        volume_reaction = _volume_reaction(volume_series, event_date, end_date)
++        peer_reaction = _peer_basket_reaction(peer_basket_prices, event_date, end_date)
++        causality_confidence = "medium" if event_timestamp else "low"
++        notes = [] if event_timestamp else ["Daily data cannot establish intraday causal ordering."]
++        label = classify_reaction(sentiment, abnormal["combined_abnormal_return"], peer_reaction, causality_confidence)
++        results.append(
++            {
++                "ticker": ticker.upper(),
++                "event_date": str(pd.Timestamp(event_date).date()),
++                "event_timestamp": event_timestamp.isoformat() if event_timestamp else None,
++                "catalyst_type": catalyst_type,
++                "sentiment": sentiment,
++                "benchmark": benchmark,
++                "sector_proxy": sector_proxy,
++                "horizon_days": horizon,
++                "raw_return": abnormal["raw_return"],
++                "market_adjusted_return": _safe_difference(abnormal["raw_return"], abnormal["market_return"]),
++                "beta_adjusted_return": abnormal["beta_adjusted_return"],
++                "sector_adjusted_return": sector_adjusted,
++                "combined_abnormal_return": abnormal["combined_abnormal_return"],
++                "volume_reaction": volume_reaction,
++                "peer_basket_reaction": peer_reaction,
++                "reaction_label": label,
++                "confidence": _confidence(abnormal["data_quality_flag"], causality_confidence),
++                "causality_confidence": causality_confidence,
++                "data_quality_flag": abnormal["data_quality_flag"],
++                "notes": notes,
++            }
++        )
++    return results
++
++
++def classify_reaction(
++    sentiment: str,
++    abnormal_return: float | None,
++    peer_basket_reaction: float | None = None,
++    causality_confidence: str = "low",
++) -> str:
++    if abnormal_return is None:
++        return "Inconclusive"
++    normalized = sentiment.lower()
++    threshold = 0.005
++    if normalized == "positive" and abnormal_return > threshold:
++        return "Positive Abnormal Reaction"
++    if normalized == "positive" and abnormal_return < -threshold:
++        return "Sell the News"
++    if normalized == "negative" and abnormal_return >= 0:
++        return "Bad News Absorbed"
++    if normalized == "negative" and abnormal_return < -threshold:
++        return "Negative Abnormal Reaction"
++    if normalized in {"neutral", "mixed"}:
++        if peer_basket_reaction is not None and abs(abnormal_return) > threshold and abs(peer_basket_reaction) > threshold:
++            return "Positive Abnormal Reaction" if abnormal_return > 0 else "Negative Abnormal Reaction"
++        return "Inconclusive"
++    if causality_confidence == "low":
++        return "Inconclusive"
++    return "No Meaningful Abnormal Reaction" if abs(abnormal_return) <= threshold else "Inconclusive"
++
++
++def _volume_reaction(volume_series: pd.Series | None, start_date, end_date) -> float | None:
++    if volume_series is None or volume_series.empty:
++        return None
++    series = pd.Series(volume_series).dropna().sort_index()
++    window = series.loc[(series.index >= pd.Timestamp(start_date)) & (series.index <= pd.Timestamp(end_date))]
++    trailing = series.loc[series.index < pd.Timestamp(start_date)].tail(20)
++    if window.empty or trailing.empty or trailing.mean() == 0:
++        return None
++    return float(window.mean() / trailing.mean())
++
++
++def _peer_basket_reaction(peer_basket_prices: dict[str, pd.Series] | None, start_date, end_date) -> float | None:
++    if not peer_basket_prices:
++        return None
++    returns = [calculate_raw_return(series, start_date, end_date) for series in peer_basket_prices.values()]
++    valid = [value for value in returns if value is not None]
++    return float(sum(valid) / len(valid)) if valid else None
++
++
++def _safe_difference(left, right):
++    return None if left is None or right is None else float(left - right)
++
++
++def _confidence(data_quality_flag: str, causality_confidence: str) -> float:
++    if data_quality_flag != "ok":
++        return 0.35
++    return 0.7 if causality_confidence == "medium" else 0.5
++
+diff --git a/src/forward_tracker.py b/src/forward_tracker.py
+new file mode 100644
+index 0000000..1429704
+--- /dev/null
++++ b/src/forward_tracker.py
+@@ -0,0 +1,232 @@
++from __future__ import annotations
++
++import json
++import sqlite3
++import uuid
++from datetime import datetime, timezone
++from pathlib import Path
++
++import pandas as pd
++
++from .abnormal_returns import abnormal_return_summary, calculate_raw_return
++from .config import DB_PATH
++from .database import connect, init_database
++from .horizons import EVENT_REACTION_HORIZONS, SWING_HORIZON, THEME_HORIZON
++
++
++FORWARD_HORIZONS = [*EVENT_REACTION_HORIZONS, SWING_HORIZON, THEME_HORIZON]
++
++
++def record_signal_snapshot(
++    ticker: str,
++    signal_type: str,
++    horizon_days: int,
++    classification_at_creation: str,
++    score_at_creation: float | None = None,
++    price_at_creation: float | None = None,
++    benchmark_at_creation: float | None = None,
++    sector_proxy_at_creation: str | None = None,
++    market_regime_at_creation: str | None = None,
++    theme: str | None = None,
++    basket: list[str] | None = None,
++    evidence: dict | None = None,
++    rule_version: str = "validation_v1",
++    model_version: str | None = None,
++    thesis_or_event_id: str | None = None,
++    db_path: Path | str = DB_PATH,
++) -> str:
++    init_database(db_path)
++    signal_id = str(uuid.uuid4())
++    with connect(db_path) as conn:
++        conn.execute(
++            """
++            INSERT INTO signal_snapshots (
++                signal_id, created_at, ticker, signal_type, horizon_days, thesis_or_event_id,
++                classification_at_creation, score_at_creation, price_at_creation, benchmark_at_creation,
++                sector_proxy, market_regime, theme, basket, evidence_json, rule_version, model_version
++            )
++            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++            """,
++            (
++                signal_id,
++                _now(),
++                ticker.upper(),
++                signal_type,
++                horizon_days,
++                thesis_or_event_id,
++                classification_at_creation,
++                score_at_creation,
++                price_at_creation,
++                benchmark_at_creation,
++                sector_proxy_at_creation,
++                market_regime_at_creation,
++                theme,
++                json.dumps(basket or []),
++                json.dumps(evidence or {}),
++                rule_version,
++                model_version,
++            ),
++        )
++    return signal_id
++
++
++def compute_forward_returns(
++    price_series: pd.Series,
++    start_date,
++    benchmark_series: pd.Series | None = None,
++    sector_proxy_series: pd.Series | None = None,
++    horizons: list[int] | None = None,
++) -> dict:
++    horizons = horizons or FORWARD_HORIZONS
++    outcomes: dict[str, float | None] = {}
++    for horizon in horizons:
++        end_date = pd.Timestamp(start_date) + pd.Timedelta(days=horizon)
++        raw = calculate_raw_return(price_series, start_date, end_date)
++        outcomes[f"forward_{horizon}d_return"] = raw
++        if benchmark_series is not None:
++            abnormal = abnormal_return_summary(price_series, benchmark_series, start_date, end_date, sector_proxy_prices=sector_proxy_series)
++            outcomes[f"forward_{horizon}d_abnormal_return"] = abnormal["combined_abnormal_return"]
++        else:
++            outcomes[f"forward_{horizon}d_abnormal_return"] = raw
++    outcomes.update(_runup_drawdown(price_series, start_date, max(horizons)))
++    return outcomes
++
++
++def update_matured_signals(
++    price_lookup: dict[str, pd.Series],
++    benchmark_series: pd.Series | None = None,
++    db_path: Path | str = DB_PATH,
++    as_of: datetime | None = None,
++) -> int:
++    init_database(db_path)
++    as_of = as_of or datetime.now(timezone.utc)
++    updated = 0
++    with connect(db_path) as conn:
++        signals = conn.execute("SELECT * FROM signal_snapshots").fetchall()
++        for signal in signals:
++            created_at = pd.Timestamp(signal["created_at"])
++            if created_at + pd.Timedelta(days=signal["horizon_days"]) > pd.Timestamp(as_of):
++                _upsert_outcome(conn, signal["signal_id"], {"is_matured": 0, "data_quality_flag": "ok"}, signal["classification_at_creation"])
++                continue
++            prices = price_lookup.get(signal["ticker"])
++            if prices is None:
++                _upsert_outcome(conn, signal["signal_id"], {"is_matured": 0, "data_quality_flag": "insufficient_price_history"}, signal["classification_at_creation"])
++                continue
++            returns = compute_forward_returns(prices, created_at, benchmark_series)
++            returns["is_matured"] = 1
++            returns["data_quality_flag"] = "ok"
++            _upsert_outcome(conn, signal["signal_id"], returns, signal["classification_at_creation"])
++            updated += 1
++    return updated
++
++
++def get_signal_outcomes(db_path: Path | str = DB_PATH) -> list[dict]:
++    init_database(db_path)
++    with connect(db_path) as conn:
++        rows = conn.execute(
++            """
++            SELECT signal_snapshots.*, signal_outcomes.*
++            FROM signal_snapshots
++            LEFT JOIN signal_outcomes ON signal_snapshots.signal_id = signal_outcomes.signal_id
++            ORDER BY signal_snapshots.created_at DESC
++            """
++        ).fetchall()
++        return [dict(row) for row in rows]
++
++
++def calculate_hit_rate(outcomes: list[dict], classification: str | None = None) -> float | None:
++    filtered = [item for item in outcomes if item.get("is_matured") and (classification is None or item.get("classification_at_creation") == classification)]
++    if not filtered:
++        return None
++    hits = [item for item in filtered if item.get("hit") == 1]
++    return len(hits) / len(filtered)
++
++
++def _upsert_outcome(conn: sqlite3.Connection, signal_id: str, values: dict, classification: str) -> None:
++    hit, avoided_bad_trade, false_negative = _classify_outcome(classification, values)
++    payload = {
++        "evaluated_at": _now(),
++        "is_matured": values.get("is_matured", 0),
++        "forward_1d_return": values.get("forward_1d_return"),
++        "forward_3d_return": values.get("forward_3d_return"),
++        "forward_5d_return": values.get("forward_5d_return"),
++        "forward_20d_return": values.get("forward_20d_return"),
++        "forward_1d_abnormal_return": values.get("forward_1d_abnormal_return"),
++        "forward_3d_abnormal_return": values.get("forward_3d_abnormal_return"),
++        "forward_5d_abnormal_return": values.get("forward_5d_abnormal_return"),
++        "forward_20d_abnormal_return": values.get("forward_20d_abnormal_return"),
++        "max_drawdown_during_horizon": values.get("max_drawdown_during_horizon"),
++        "max_runup_during_horizon": values.get("max_runup_during_horizon"),
++        "hit": hit,
++        "avoided_bad_trade": avoided_bad_trade,
++        "false_negative": false_negative,
++        "data_quality_flag": values.get("data_quality_flag", "ok"),
++    }
++    conn.execute(
++        """
++        INSERT INTO signal_outcomes (
++            signal_id, evaluated_at, is_matured, forward_1d_return, forward_3d_return,
++            forward_5d_return, forward_20d_return, forward_1d_abnormal_return,
++            forward_3d_abnormal_return, forward_5d_abnormal_return, forward_20d_abnormal_return,
++            max_drawdown_during_horizon, max_runup_during_horizon, hit, avoided_bad_trade,
++            false_negative, data_quality_flag
++        )
++        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++        ON CONFLICT(signal_id) DO UPDATE SET
++            evaluated_at=excluded.evaluated_at,
++            is_matured=excluded.is_matured,
++            forward_1d_return=excluded.forward_1d_return,
++            forward_3d_return=excluded.forward_3d_return,
++            forward_5d_return=excluded.forward_5d_return,
++            forward_20d_return=excluded.forward_20d_return,
++            forward_1d_abnormal_return=excluded.forward_1d_abnormal_return,
++            forward_3d_abnormal_return=excluded.forward_3d_abnormal_return,
++            forward_5d_abnormal_return=excluded.forward_5d_abnormal_return,
++            forward_20d_abnormal_return=excluded.forward_20d_abnormal_return,
++            max_drawdown_during_horizon=excluded.max_drawdown_during_horizon,
++            max_runup_during_horizon=excluded.max_runup_during_horizon,
++            hit=excluded.hit,
++            avoided_bad_trade=excluded.avoided_bad_trade,
++            false_negative=excluded.false_negative,
++            data_quality_flag=excluded.data_quality_flag
++        """,
++        (signal_id, *payload.values()),
++    )
++
++
++def _classify_outcome(classification: str, values: dict) -> tuple[int | None, int | None, int | None]:
++    abnormal = values.get("forward_5d_abnormal_return") or values.get("forward_3d_abnormal_return") or values.get("forward_1d_abnormal_return")
++    drawdown = values.get("max_drawdown_during_horizon") or 0
++    if not values.get("is_matured") or abnormal is None:
++        return None, None, None
++    if classification in {"Tradeable", "Watch", "Wait for Confirmation"}:
++        return int(abnormal > 0), None, None
++    if classification in {"Avoid", "Avoid Chase"}:
++        avoided = int(abnormal <= 0 or drawdown <= -0.05)
++        false_negative = int(abnormal >= 0.05)
++        return None, avoided, false_negative
++    return None, None, None
++
++
++def _runup_drawdown(price_series: pd.Series, start_date, horizon: int) -> dict:
++    series = pd.Series(price_series).dropna().sort_index()
++    start = pd.Timestamp(start_date)
++    if isinstance(series.index, pd.DatetimeIndex) and series.index.tz is None and start.tzinfo is not None:
++        start = start.tz_convert(None)
++    elif isinstance(series.index, pd.DatetimeIndex) and series.index.tz is not None and start.tzinfo is None:
++        start = start.tz_localize(series.index.tz)
++    end = start + pd.Timedelta(days=horizon)
++    window = series.loc[(series.index >= start) & (series.index <= end)]
++    if window.empty:
++        return {"max_drawdown_during_horizon": None, "max_runup_during_horizon": None}
++    start_price = window.iloc[0]
++    if start_price == 0:
++        return {"max_drawdown_during_horizon": None, "max_runup_during_horizon": None}
++    return {
++        "max_drawdown_during_horizon": float((window.min() / start_price) - 1),
++        "max_runup_during_horizon": float((window.max() / start_price) - 1),
++    }
++
++
++def _now() -> str:
++    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+diff --git a/src/horizons.py b/src/horizons.py
+new file mode 100644
+index 0000000..d7050f1
+--- /dev/null
++++ b/src/horizons.py
+@@ -0,0 +1,41 @@
++from __future__ import annotations
++
++EVENT_REACTION_HORIZONS = [1, 3]
++SWING_HORIZON = 5
++THEME_HORIZON = 20
++LONGER_CONTEXT_HORIZON = 60
++
++HORIZON_LABELS = {
++    1: "1D: immediate event reaction",
++    3: "3D: short event digestion",
++    5: "5D: swing setup validation",
++    20: "20D: theme thesis validation",
++    60: "60D: broader trend context",
++}
++
++SIGNAL_TYPE_DEFAULT_HORIZONS = {
++    "event_reaction": EVENT_REACTION_HORIZONS,
++    "trade_setup": [SWING_HORIZON],
++    "theme_thesis": [THEME_HORIZON],
++    "technical_extension": [SWING_HORIZON, THEME_HORIZON],
++    "basket_confirmation": [SWING_HORIZON, THEME_HORIZON],
++}
++
++
++def get_horizon_label(horizon_days: int) -> str:
++    validate_horizon(horizon_days)
++    return HORIZON_LABELS[horizon_days]
++
++
++def validate_horizon(horizon_days: int) -> int:
++    if horizon_days not in HORIZON_LABELS:
++        raise ValueError(f"Unsupported validation horizon: {horizon_days}")
++    return horizon_days
++
++
++def get_default_horizons_for_signal(signal_type: str) -> list[int]:
++    try:
++        return SIGNAL_TYPE_DEFAULT_HORIZONS[signal_type]
++    except KeyError as exc:
++        raise ValueError(f"Unsupported signal type: {signal_type}") from exc
++
+diff --git a/src/market_data.py b/src/market_data.py
+index a21abd9..e8dd43e 100644
+--- a/src/market_data.py
++++ b/src/market_data.py
+@@ -1,8 +1,10 @@
+ from __future__ import annotations
+ 
++from datetime import datetime, timedelta, timezone
++
+ import pandas as pd
+ 
+-from .config import DEFAULT_MARKET_PROXIES
++from .config import DEFAULT_MARKET_PROXIES, PRICE_CACHE_DIR
+ from .indicators import stock_metrics
+ 
+ 
+@@ -18,10 +20,20 @@ class YFinanceAdapter(MarketDataAdapter):
+         return yf.download(ticker, period=period, progress=False, auto_adjust=True)
+ 
+ 
+-def get_history(ticker: str, period: str = "6mo", adapter: MarketDataAdapter | None = None) -> pd.DataFrame:
++def get_history(
++    ticker: str,
++    period: str = "6mo",
++    adapter: MarketDataAdapter | None = None,
++    cache_expiry_hours: int = 6,
++) -> pd.DataFrame:
+     adapter = adapter or YFinanceAdapter()
++    cached = _read_price_cache(ticker, period, cache_expiry_hours)
++    if cached is not None:
++        return cached
+     try:
+-        return adapter.history(ticker, period)
++        history = adapter.history(ticker, period)
++        _write_price_cache(ticker, period, history)
++        return history
+     except Exception:
+         return pd.DataFrame()
+ 
+@@ -95,3 +107,27 @@ def _average_return(metrics: list[dict], key: str) -> float | None:
+     values = [m[key] for m in metrics if m.get(key) is not None]
+     return float(sum(values) / len(values)) if values else None
+ 
++
++def _cache_path(ticker: str, period: str):
++    safe = ticker.replace("/", "_").replace("^", "idx_").upper()
++    return PRICE_CACHE_DIR / f"{safe}_{period}.pkl"
++
++
++def _read_price_cache(ticker: str, period: str, cache_expiry_hours: int) -> pd.DataFrame | None:
++    path = _cache_path(ticker, period)
++    if not path.exists():
++        return None
++    modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
++    if datetime.now(timezone.utc) - modified > timedelta(hours=cache_expiry_hours):
++        return None
++    try:
++        return pd.read_pickle(path)
++    except Exception:
++        return None
++
++
++def _write_price_cache(ticker: str, period: str, history: pd.DataFrame) -> None:
++    if history is None or history.empty:
++        return
++    PRICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
++    history.to_pickle(_cache_path(ticker, period))
+diff --git a/src/rule_based_thesis_validator.py b/src/rule_based_thesis_validator.py
+new file mode 100644
+index 0000000..210c400
+--- /dev/null
++++ b/src/rule_based_thesis_validator.py
+@@ -0,0 +1,156 @@
++from __future__ import annotations
++
++from .horizons import EVENT_REACTION_HORIZONS, SWING_HORIZON, THEME_HORIZON, get_horizon_label
++
++RULE_VERSION = "validation_v1"
++
++
++def validate_thesis(
++    price_features: dict,
++    abnormal_return_features: dict,
++    event_study_results: list[dict] | None = None,
++    basket_breadth: float | None = None,
++    news_signal: dict | None = None,
++    macro_regime: str = "Neutral",
++    extension_status: dict | None = None,
++) -> dict:
++    event_study_results = event_study_results or []
++    news_signal = news_signal or {}
++    extension_status = extension_status or {}
++
++    evidence_for: list[str] = []
++    evidence_against: list[str] = []
++    confirmation_needed: list[str] = []
++    invalidation_signals: list[str] = []
++    score = 0
++
++    if price_features.get("above_ma20"):
++        score += 2
++        evidence_for.append("Ticker is above the 20D moving average.")
++    else:
++        score -= 1
++        evidence_against.append("Ticker is not above the 20D moving average.")
++
++    abnormal_5d = abnormal_return_features.get("5d") or abnormal_return_features.get("forward_5d_abnormal_return")
++    if abnormal_5d is not None and abnormal_5d > 0:
++        score += 2
++        evidence_for.append("5D abnormal return is positive.")
++    elif abnormal_5d is not None:
++        score -= 2
++        evidence_against.append("5D abnormal return is negative.")
++    else:
++        confirmation_needed.append("Need 5D abnormal return validation.")
++
++    if basket_breadth is not None and basket_breadth > 0.5:
++        score += 2
++        evidence_for.append("Basket breadth is above 50%.")
++    elif basket_breadth is not None:
++        score -= 1
++        evidence_against.append("Basket breadth is not broad enough.")
++
++    if (price_features.get("volume_ratio") or 0) > 1.2:
++        score += 1
++        evidence_for.append("Volume is above 1.2x its recent average.")
++
++    high_rsi = (price_features.get("rsi") or 0) > 75
++    high_distance = (extension_status.get("distance_from_20d_ma") or price_features.get("distance_from_20d_ma") or 0) > 0.10
++    if high_rsi:
++        score -= 3
++        evidence_against.append("RSI is above 75.")
++        invalidation_signals.append("Overextension risk remains high.")
++    if high_distance:
++        score -= 3
++        evidence_against.append("Price is more than 10% above the 20D moving average.")
++        invalidation_signals.append("Wait for price to digest the move.")
++    if macro_regime == "Risk-Off":
++        score -= 2
++        evidence_against.append("Macro regime is Risk-Off.")
++
++    positive_event = _positive_event_reaction(event_study_results)
++    negative_event_after_positive_news = _negative_event_after_positive_news(event_study_results, news_signal)
++    if positive_event:
++        score += 2
++        evidence_for.append("Event study shows a positive abnormal reaction.")
++    if negative_event_after_positive_news:
++        score -= 3
++        evidence_against.append("Positive news produced a negative abnormal reaction.")
++
++    if _news_confirms_but_extended(news_signal, event_study_results, high_rsi, high_distance, price_features):
++        return {
++            "thesis_status_by_horizon": _status_by_horizon("Confirmed on 1D event reaction", "Unconfirmed on 5D forward return", "Still open on 20D theme horizon"),
++            "classification": "Avoid Chase",
++            "score": score,
++            "reason": "The catalyst was positively received, but the stock is already technically extended.",
++            "evidence_for": evidence_for,
++            "evidence_against": evidence_against,
++            "confirmation_needed": confirmation_needed,
++            "invalidation_signals": invalidation_signals,
++            "rule_version": RULE_VERSION,
++        }
++
++    classification = _classification(score, high_rsi or high_distance, bool(evidence_against))
++    return {
++        "thesis_status_by_horizon": _status_by_horizon(
++            "Confirmed on 1D event reaction" if positive_event else "Inconclusive on 1D event reaction",
++            "Confirmed on 5D swing horizon" if abnormal_5d and abnormal_5d > 0 else "Unconfirmed on 5D forward return",
++            "Still open on 20D theme horizon",
++        ),
++        "classification": classification,
++        "score": score,
++        "reason": _reason(classification, score, evidence_against),
++        "evidence_for": evidence_for,
++        "evidence_against": evidence_against,
++        "confirmation_needed": confirmation_needed,
++        "invalidation_signals": invalidation_signals,
++        "rule_version": RULE_VERSION,
++    }
++
++
++def _classification(score: int, extended: bool, conflicts: bool) -> str:
++    if score < 0:
++        return "Avoid"
++    if extended and score > 0:
++        return "Avoid Chase"
++    if conflicts and score >= 3:
++        return "Watch"
++    if score >= 6:
++        return "Tradeable"
++    if score >= 2:
++        return "Watch"
++    return "Wait for Confirmation"
++
++
++def _status_by_horizon(event_status: str, swing_status: str, theme_status: str) -> dict:
++    return {
++        get_horizon_label(EVENT_REACTION_HORIZONS[0]): event_status,
++        get_horizon_label(SWING_HORIZON): swing_status,
++        get_horizon_label(THEME_HORIZON): theme_status,
++    }
++
++
++def _positive_event_reaction(event_study_results: list[dict]) -> bool:
++    return any(item.get("reaction_label") == "Positive Abnormal Reaction" for item in event_study_results)
++
++
++def _negative_event_after_positive_news(event_study_results: list[dict], news_signal: dict) -> bool:
++    return news_signal.get("sentiment") == "positive" and any((item.get("combined_abnormal_return") or 0) < 0 for item in event_study_results)
++
++
++def _news_confirms_but_extended(news_signal: dict, event_study_results: list[dict], high_rsi: bool, high_distance: bool, price_features: dict) -> bool:
++    positive_news = news_signal.get("sentiment") == "positive"
++    positive_abnormal = any((item.get("combined_abnormal_return") or 0) > 0 for item in event_study_results)
++    volume_spike = (price_features.get("volume_ratio") or 0) > 1.5
++    return positive_news and positive_abnormal and (high_rsi or high_distance) and volume_spike
++
++
++def _reason(classification: str, score: int, evidence_against: list[str]) -> str:
++    if classification == "Tradeable":
++        return "Rule-based evidence is broad enough and extension risk is not high."
++    if classification == "Watch":
++        return "Evidence is constructive but still has conflicts or missing confirmation."
++    if classification == "Avoid Chase":
++        return "Setup has positive evidence but extension risk is high."
++    if classification == "Avoid":
++        return "Evidence conflicts or score is negative."
++    return "More forward-return confirmation is needed."
++
+diff --git a/src/signal_evaluator.py b/src/signal_evaluator.py
+new file mode 100644
+index 0000000..c70fb66
+--- /dev/null
++++ b/src/signal_evaluator.py
+@@ -0,0 +1,93 @@
++from __future__ import annotations
++
++from statistics import median
++
++
++GROUP_FIELDS = ["horizon_days", "classification_at_creation", "theme", "ticker", "market_regime", "catalyst_type", "rule_version"]
++
++
++def calculate_validation_metrics(records: list[dict], group_by: list[str] | None = None) -> list[dict]:
++    group_by = group_by or ["horizon_days", "classification_at_creation"]
++    groups: dict[tuple, list[dict]] = {}
++    for record in records:
++        key = tuple(record.get(field) for field in group_by)
++        groups.setdefault(key, []).append(record)
++
++    metrics = []
++    for key, items in groups.items():
++        matured = [item for item in items if item.get("is_matured")]
++        hit_rate = _ratio([item for item in matured if item.get("hit") == 1], matured)
++        base_rate = calculate_base_rate(records, key_filter=dict(zip(group_by, key)))
++        excess = None if hit_rate is None or base_rate is None else hit_rate - base_rate
++        abnormal_values = [_forward_abnormal(item) for item in matured]
++        abnormal_values = [value for value in abnormal_values if value is not None]
++        drawdowns = [item.get("max_drawdown_during_horizon") for item in matured if item.get("max_drawdown_during_horizon") is not None]
++        metric = {
++            "signal_count": len(items),
++            "matured_count": len(matured),
++            "hit_rate": hit_rate,
++            "base_rate": base_rate,
++            "excess_hit_rate": excess,
++            "avg_forward_abnormal_return": _average(abnormal_values),
++            "median_forward_abnormal_return": median(abnormal_values) if abnormal_values else None,
++            "avg_max_drawdown": _average(drawdowns),
++            "false_positive_rate": calculate_false_positive_rate(matured),
++            "false_negative_rate": calculate_false_negative_rate(matured),
++        }
++        metric.update(dict(zip(group_by, key)))
++        metrics.append(metric)
++    return metrics
++
++
++def calculate_base_rate(records: list[dict], key_filter: dict | None = None) -> float | None:
++    key_filter = key_filter or {}
++    horizon = key_filter.get("horizon_days")
++    theme = key_filter.get("theme")
++    universe = [
++        record
++        for record in records
++        if record.get("is_matured")
++        and (horizon is None or record.get("horizon_days") == horizon)
++        and (theme is None or record.get("theme") == theme)
++    ]
++    if not universe:
++        return None
++    positives = [record for record in universe if (_forward_abnormal(record) or 0) > 0]
++    return len(positives) / len(universe)
++
++
++def calculate_false_positive_rate(records: list[dict]) -> float | None:
++    bullish = [item for item in records if item.get("classification_at_creation") in {"Tradeable", "Watch"}]
++    if not bullish:
++        return None
++    misses = [item for item in bullish if item.get("hit") == 0]
++    return len(misses) / len(bullish)
++
++
++def calculate_false_negative_rate(records: list[dict]) -> float | None:
++    avoided = [item for item in records if item.get("classification_at_creation") in {"Avoid", "Avoid Chase"}]
++    if not avoided:
++        return None
++    false_negatives = [item for item in avoided if item.get("false_negative") == 1]
++    return len(false_negatives) / len(avoided)
++
++
++def _forward_abnormal(record: dict) -> float | None:
++    horizon = record.get("horizon_days")
++    if horizon:
++        value = record.get(f"forward_{horizon}d_abnormal_return")
++        if value is not None:
++            return value
++    for key in ["forward_20d_abnormal_return", "forward_5d_abnormal_return", "forward_3d_abnormal_return", "forward_1d_abnormal_return"]:
++        if record.get(key) is not None:
++            return record[key]
++    return None
++
++
++def _average(values: list[float]) -> float | None:
++    return sum(values) / len(values) if values else None
++
++
++def _ratio(part: list, whole: list) -> float | None:
++    return len(part) / len(whole) if whole else None
++
+diff --git a/tests/test_abnormal_returns.py b/tests/test_abnormal_returns.py
+new file mode 100644
+index 0000000..9248634
+--- /dev/null
++++ b/tests/test_abnormal_returns.py
+@@ -0,0 +1,38 @@
++import pandas as pd
++import pytest
++
++from src.abnormal_returns import (
++    abnormal_return_summary,
++    calculate_beta_adjusted_return,
++    calculate_raw_return,
++    calculate_sector_adjusted_return,
++)
++
++
++def prices(values):
++    return pd.Series(values, index=pd.date_range("2026-01-01", periods=len(values)))
++
++
++def test_raw_return_calculation():
++    assert calculate_raw_return(prices([100, 110]), "2026-01-01", "2026-01-02") == pytest.approx(0.1)
++
++
++def test_beta_adjusted_abnormal_return():
++    assert calculate_beta_adjusted_return(0.1, 1.5, 0.02) == 0.07
++
++
++def test_sector_adjusted_return():
++    assert calculate_sector_adjusted_return(0.1, 0.04) == 0.060000000000000005
++
++
++def test_missing_sector_proxy_falls_back_to_spy_only():
++    result = abnormal_return_summary(
++        prices([100 + i for i in range(140)]),
++        prices([100 + i * 0.5 for i in range(140)]),
++        "2026-01-10",
++        "2026-01-20",
++        sector_proxy="SMH",
++    )
++    assert result["calculation_method"] == "beta_adjusted_spy_only"
++    assert result["data_quality_flag"] == "missing_sector_proxy"
++    assert result["combined_abnormal_return"] is not None
+diff --git a/tests/test_event_study.py b/tests/test_event_study.py
+new file mode 100644
+index 0000000..fc67f6a
+--- /dev/null
++++ b/tests/test_event_study.py
+@@ -0,0 +1,27 @@
++import pandas as pd
++
++from src.event_study import classify_reaction, run_event_study
++
++
++def test_event_reaction_labels():
++    assert classify_reaction("positive", 0.02) == "Positive Abnormal Reaction"
++    assert classify_reaction("positive", -0.02) == "Sell the News"
++    assert classify_reaction("negative", 0.0) == "Bad News Absorbed"
++
++
++def test_missing_timestamp_lowers_causality_confidence():
++    idx = pd.date_range("2026-01-01", periods=10)
++    ticker = pd.Series([100, 100, 105, 106, 107, 108, 109, 110, 111, 112], index=idx)
++    benchmark = pd.Series([100, 100, 101, 101, 102, 102, 103, 103, 104, 104], index=idx)
++    result = run_event_study(
++        "AAA",
++        "2026-01-02",
++        "guidance",
++        "positive",
++        ticker,
++        benchmark,
++        horizons=[1],
++    )[0]
++    assert result["causality_confidence"] == "low"
++    assert "Daily data cannot establish intraday causal ordering." in result["notes"]
++
+diff --git a/tests/test_forward_tracker.py b/tests/test_forward_tracker.py
+new file mode 100644
+index 0000000..f31a35c
+--- /dev/null
++++ b/tests/test_forward_tracker.py
+@@ -0,0 +1,75 @@
++from datetime import datetime, timedelta, timezone
++
++import pandas as pd
++
++from src.database import init_database
++from src.forward_tracker import compute_forward_returns, get_signal_outcomes, record_signal_snapshot, update_matured_signals
++
++
++def test_signal_snapshot_creation(tmp_path):
++    db_path = tmp_path / "signals.db"
++    init_database(db_path)
++    signal_id = record_signal_snapshot("AAA", "trade_setup", 5, "Tradeable", db_path=db_path)
++    outcomes = get_signal_outcomes(db_path)
++    assert outcomes[0]["signal_id"] == signal_id
++    assert outcomes[0]["ticker"] == "AAA"
++
++
++def test_forward_return_computation_and_bullish_hit(tmp_path):
++    db_path = tmp_path / "signals.db"
++    init_database(db_path)
++    created_at = datetime.now(timezone.utc) - timedelta(days=10)
++    signal_id = record_signal_snapshot("AAA", "trade_setup", 5, "Tradeable", db_path=db_path)
++    with init_conn(db_path) as conn:
++        conn.execute("UPDATE signal_snapshots SET created_at = ? WHERE signal_id = ?", (created_at.isoformat(timespec="seconds"), signal_id))
++    series = pd.Series([100, 101, 102, 103, 104, 106, 107], index=pd.date_range(created_at.date(), periods=7))
++    updated = update_matured_signals({"AAA": series}, db_path=db_path, as_of=datetime.now(timezone.utc))
++    outcome = get_signal_outcomes(db_path)[0]
++    assert updated == 1
++    assert outcome["is_matured"] == 1
++    assert outcome["hit"] == 1
++
++
++def test_avoid_chase_outcome_tracking(tmp_path):
++    db_path = tmp_path / "signals.db"
++    init_database(db_path)
++    created_at = datetime.now(timezone.utc) - timedelta(days=10)
++    signal_id = record_signal_snapshot("AAA", "trade_setup", 5, "Avoid Chase", db_path=db_path)
++    with init_conn(db_path) as conn:
++        conn.execute("UPDATE signal_snapshots SET created_at = ? WHERE signal_id = ?", (created_at.isoformat(timespec="seconds"), signal_id))
++    series = pd.Series([100, 99, 98, 97, 96, 95, 94], index=pd.date_range(created_at.date(), periods=7))
++    update_matured_signals({"AAA": series}, db_path=db_path, as_of=datetime.now(timezone.utc))
++    outcome = get_signal_outcomes(db_path)[0]
++    assert outcome["avoided_bad_trade"] == 1
++    assert outcome["false_negative"] == 0
++
++
++def test_unmatured_signal_stays_open(tmp_path):
++    db_path = tmp_path / "signals.db"
++    init_database(db_path)
++    record_signal_snapshot("AAA", "trade_setup", 20, "Watch", db_path=db_path)
++    updated = update_matured_signals({"AAA": pd.Series(dtype=float)}, db_path=db_path, as_of=datetime.now(timezone.utc))
++    assert updated == 0
++    assert get_signal_outcomes(db_path)[0]["is_matured"] == 0
++
++
++def test_compute_forward_returns():
++    idx = pd.date_range("2026-01-01", periods=25)
++    returns = compute_forward_returns(pd.Series(range(100, 125), index=idx), "2026-01-01", horizons=[5])
++    assert returns["forward_5d_return"] > 0
++    assert returns["max_runup_during_horizon"] > 0
++
++
++from contextlib import contextmanager
++import sqlite3
++
++
++@contextmanager
++def init_conn(path):
++    conn = sqlite3.connect(path)
++    try:
++        yield conn
++        conn.commit()
++    finally:
++        conn.close()
++
+diff --git a/tests/test_horizons.py b/tests/test_horizons.py
+new file mode 100644
+index 0000000..106ab2a
+--- /dev/null
++++ b/tests/test_horizons.py
+@@ -0,0 +1,15 @@
++import pytest
++
++from src.horizons import get_default_horizons_for_signal, get_horizon_label, validate_horizon
++
++
++def test_horizon_labels_and_defaults():
++    assert get_horizon_label(5) == "5D: swing setup validation"
++    assert get_default_horizons_for_signal("event_reaction") == [1, 3]
++    assert get_default_horizons_for_signal("theme_thesis") == [20]
++
++
++def test_invalid_horizon_rejected():
++    with pytest.raises(ValueError):
++        validate_horizon(7)
++
+diff --git a/tests/test_rule_based_thesis_validator.py b/tests/test_rule_based_thesis_validator.py
+new file mode 100644
+index 0000000..5d435c9
+--- /dev/null
++++ b/tests/test_rule_based_thesis_validator.py
+@@ -0,0 +1,49 @@
++from src.rule_based_thesis_validator import validate_thesis
++
++
++def test_overextended_positive_catalyst_is_avoid_chase():
++    result = validate_thesis(
++        {"above_ma20": True, "rsi": 80, "distance_from_20d_ma": 0.12, "volume_ratio": 2.0},
++        {"5d": 0.03},
++        [{"combined_abnormal_return": 0.04, "reaction_label": "Positive Abnormal Reaction"}],
++        basket_breadth=0.7,
++        news_signal={"sentiment": "positive"},
++        macro_regime="Risk-On",
++    )
++    assert result["classification"] == "Avoid Chase"
++    assert result["reason"] == "The catalyst was positively received, but the stock is already technically extended."
++
++
++def test_positive_breadth_normal_extension_tradeable_or_watch():
++    result = validate_thesis(
++        {"above_ma20": True, "rsi": 60, "distance_from_20d_ma": 0.03, "volume_ratio": 1.3},
++        {"5d": 0.03},
++        [{"combined_abnormal_return": 0.02, "reaction_label": "Positive Abnormal Reaction"}],
++        basket_breadth=0.8,
++        news_signal={"sentiment": "positive"},
++        macro_regime="Risk-On",
++    )
++    assert result["classification"] in {"Watch", "Tradeable"}
++
++
++def test_risk_off_macro_penalty():
++    result = validate_thesis(
++        {"above_ma20": True, "rsi": 60, "distance_from_20d_ma": 0.03, "volume_ratio": 1.0},
++        {"5d": 0.01},
++        [],
++        basket_breadth=0.6,
++        macro_regime="Risk-Off",
++    )
++    assert "Macro regime is Risk-Off." in result["evidence_against"]
++
++
++def test_conflicting_evidence_not_tradeable():
++    result = validate_thesis(
++        {"above_ma20": True, "rsi": 60, "distance_from_20d_ma": 0.03, "volume_ratio": 1.3},
++        {"5d": -0.02},
++        [],
++        basket_breadth=0.8,
++        macro_regime="Risk-On",
++    )
++    assert result["classification"] in {"Watch", "Wait for Confirmation", "Avoid"}
++
+diff --git a/tests/test_signal_evaluator.py b/tests/test_signal_evaluator.py
+new file mode 100644
+index 0000000..7006918
+--- /dev/null
++++ b/tests/test_signal_evaluator.py
+@@ -0,0 +1,15 @@
++from src.signal_evaluator import calculate_base_rate, calculate_validation_metrics
++
++
++def test_hit_rate_base_rate_and_excess_by_group():
++    records = [
++        {"horizon_days": 5, "classification_at_creation": "Tradeable", "is_matured": 1, "hit": 1, "forward_5d_abnormal_return": 0.02, "max_drawdown_during_horizon": -0.01},
++        {"horizon_days": 5, "classification_at_creation": "Tradeable", "is_matured": 1, "hit": 0, "forward_5d_abnormal_return": -0.01, "max_drawdown_during_horizon": -0.03},
++        {"horizon_days": 5, "classification_at_creation": "Watch", "is_matured": 1, "hit": 1, "forward_5d_abnormal_return": 0.03, "max_drawdown_during_horizon": -0.01},
++    ]
++    metrics = calculate_validation_metrics(records)
++    tradeable = next(item for item in metrics if item["classification_at_creation"] == "Tradeable")
++    assert tradeable["hit_rate"] == 0.5
++    assert calculate_base_rate(records, {"horizon_days": 5}) == 2 / 3
++    assert tradeable["excess_hit_rate"] == 0.5 - 2 / 3
++
