@@ -1,3 +1,5 @@
+import pytest
+
 from src.demo_validation_data import (
     DEPRECATED_OUTCOME_FIELD,
     EXPLICIT_OUTCOME_FIELDS,
@@ -5,8 +7,11 @@ from src.demo_validation_data import (
     build_demo_signal_inputs,
     build_demo_universe_cohort,
     build_demo_validation_database,
+    default_demo_provider,
+    demo_price_universe,
     prepare_validation_lab_data,
 )
+from src.price_provider import DemoPriceProvider
 
 GROUP_KEYS = {
     "horizon_days",
@@ -45,7 +50,8 @@ def test_build_demo_validation_database_runs_core_and_omits_deprecated_hit(tmp_p
     db_path = tmp_path / "demo.db"
     built = build_demo_validation_database(db_path)
 
-    assert set(built) == {"price_data", "evaluation"}
+    assert set(built) == {"price_data", "bundle", "evaluation"}
+    assert built["price_data"] is built["bundle"].prices  # backward-compat key points at bundle prices
     evaluation = built["evaluation"]
     assert len(evaluation) == len(build_demo_signal_inputs())
     for record in evaluation:
@@ -73,7 +79,7 @@ def test_build_demo_universe_cohort_covers_full_universe():
 def test_prepare_validation_lab_data_shape_with_explicit_db(tmp_path):
     lab = prepare_validation_lab_data(db_path=tmp_path / "lab.db")
 
-    assert set(lab) == {"snapshots", "outcomes", "metrics", "cohort"}
+    assert set(lab) == {"snapshots", "outcomes", "metrics", "cohort", "price_provenance"}
     assert lab["snapshots"], "expected recorded snapshots"
     assert lab["outcomes"], "expected matured outcomes"
 
@@ -109,3 +115,63 @@ def test_tradeable_group_compares_hit_rate_to_cohort_base_rate(tmp_path):
     assert tradeable["base_rate"] is not None
     expected_excess = tradeable["trade_hit_rate"] - tradeable["base_rate"]
     assert tradeable["excess_trade_hit_rate"] == expected_excess
+
+
+def test_default_demo_behavior_is_unchanged(tmp_path):
+    # Locks the demo result so the provider injection cannot silently alter it.
+    lab = prepare_validation_lab_data(db_path=tmp_path / "lab.db")
+    metrics = lab["metrics"]
+    assert metrics["sample_size"] == 3
+    tradeable = next(group for group in metrics["groups"] if group["classification"] == "Tradeable")
+    assert tradeable["trade_hit_rate"] == 1.0
+    assert tradeable["base_rate"] == pytest.approx(0.4)
+    assert tradeable["excess_trade_hit_rate"] == pytest.approx(0.6)
+    assert metrics["false_positives"] == 0
+    assert metrics["avoid_chase_count"] == 1
+
+
+def test_outcomes_carry_price_provenance(tmp_path):
+    lab = prepare_validation_lab_data(db_path=tmp_path / "lab.db")
+    for record in lab["outcomes"]:
+        assert record["price_source"] == "demo"
+        assert record["price_adjustment"] == "demo-synthetic"
+        assert record["price_actual_start"] is not None
+        assert isinstance(record["data_quality_flags"], list)
+    # The demo only has 12 points, so beta cannot be estimated -> engine flag surfaces.
+    assert any("beta_fallback_used" in record["data_quality_flags"] for record in lab["outcomes"])
+
+
+def test_top_level_price_provenance(tmp_path):
+    lab = prepare_validation_lab_data(db_path=tmp_path / "lab.db")
+    provenance = lab["price_provenance"]
+    assert provenance["source"] == "demo"
+    assert provenance["adjustment"] == "demo-synthetic"
+    assert provenance["missing_symbols"] == []
+
+
+def test_injected_provider_is_used(tmp_path):
+    # A provider built from the same universe must reproduce the demo result.
+    provider = DemoPriceProvider(demo_price_universe())
+    lab = prepare_validation_lab_data(db_path=tmp_path / "lab.db", provider=provider)
+    assert lab["metrics"]["sample_size"] == 3
+    assert lab["price_provenance"]["source"] == "demo"
+
+
+def test_missing_required_symbol_raises(tmp_path):
+    universe = demo_price_universe()
+    universe.pop("SPY")  # benchmark is required
+    provider = DemoPriceProvider(universe)
+    with pytest.raises(ValueError, match="missing required price history"):
+        build_demo_validation_database(tmp_path / "lab.db", provider=provider)
+
+
+def test_optional_cohort_symbol_may_be_absent(tmp_path):
+    # DAL is a cohort-only (optional) symbol; dropping it must not break the run,
+    # but the cohort should simply shrink.
+    universe = demo_price_universe()
+    universe.pop("DAL")
+    provider = DemoPriceProvider(universe)
+    lab = prepare_validation_lab_data(db_path=tmp_path / "lab.db", provider=provider)
+    cohort_tickers = {record["ticker"] for record in lab["cohort"]}
+    assert "DAL" not in cohort_tickers
+    assert lab["metrics"]["sample_size"] == 3
