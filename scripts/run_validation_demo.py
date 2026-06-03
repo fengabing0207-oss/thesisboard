@@ -64,7 +64,7 @@ def main() -> None:
     for item in demo_inputs:
         created_at = dates[0]
         sector_proxy = proxy_for_theme(item["theme"])
-        event_end = trading_session_horizon_end(created_at, 1, prices_by_ticker[item["ticker"]].index, benchmark_prices.index)
+        event_end = trading_session_horizon_end(created_at, 1, benchmark_prices.index)
         event_summary = abnormal_return_summary(
             ticker_prices=prices_by_ticker[item["ticker"]],
             benchmark_prices=benchmark_prices,
