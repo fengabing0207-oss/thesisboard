@@ -13,7 +13,12 @@ Library/
 *.db
 data/*.db
 data/price_cache/
+cache/
 *.db-journal
+*.db-shm
+*.db-wal
 *.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
 dist/
 build/
