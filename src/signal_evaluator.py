@@ -5,6 +5,7 @@ from statistics import mean, median
 
 
 TRADEABLE_CLASSES = {"Tradeable"}
+WATCH_CLASSES = {"Watch", "Wait for Confirmation"}
 CHASE_CLASSES = {"Avoid Chase"}
 
 
@@ -67,6 +68,9 @@ def _group_metrics(records: list[dict], universe_cohort: list[dict]) -> list[dic
             horizon_days=horizon_days,
         )
         trade_hits = [bool(record["trade_hit"]) for record in group if record.get("trade_hit") is not None]
+        watch_followthrough = [
+            bool(record["watch_followthrough"]) for record in group if record.get("watch_followthrough") is not None
+        ]
         avoided_bad_trades = [
             bool(record["avoided_bad_trade"]) for record in group if record.get("avoided_bad_trade") is not None
         ]
@@ -81,6 +85,7 @@ def _group_metrics(records: list[dict], universe_cohort: list[dict]) -> list[dic
                 "base_rate": base_rate,
                 "trade_hit_rate": trade_hit_rate,
                 "excess_trade_hit_rate": None if trade_hit_rate is None or base_rate is None else trade_hit_rate - base_rate,
+                "watch_followthrough_rate": _rate(watch_followthrough),
                 "avoided_bad_trade_rate": _rate(avoided_bad_trades),
                 "false_negatives": sum(1 for record in group if record.get("false_negative") is True),
                 "average_forward_abnormal_return": mean(float(record["forward_abnormal_return"]) for record in group),
