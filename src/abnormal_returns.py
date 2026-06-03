@@ -85,13 +85,31 @@ def abnormal_return_summary(
     benchmark_returns = _clean_prices(benchmark_prices).pct_change()
     ticker_returns = _returns_before(ticker_returns, estimation_end)
     benchmark_returns = _returns_before(benchmark_returns, estimation_end)
-    beta = rolling_beta(ticker_returns, benchmark_returns, lookback_days) or 1.0
+    estimated_beta = rolling_beta(ticker_returns, benchmark_returns, lookback_days)
+    beta_fallback_used = estimated_beta is None
+    beta = 1.0 if beta_fallback_used else estimated_beta
     beta_adjusted = beta_adjusted_abnormal_return(ticker_ret, beta, market_ret)
 
     sector_ret = raw_return(sector_prices, start_date, end_date) if sector_prices is not None else None
     combined = combined_abnormal_return(ticker_ret, beta, market_ret, sector_ret)
-    flag = "ok" if sector_proxy is None or sector_ret is not None else "missing_sector_proxy"
-    return _summary(ticker_ret, market_ret, beta, beta_adjusted, sector_proxy, sector_ret, combined, flag, estimation_end)
+    flags = []
+    if beta_fallback_used:
+        flags.append("beta_fallback_used")
+    if sector_proxy is not None and sector_ret is None:
+        flags.append("missing_sector_proxy")
+    flag = "ok" if not flags else ",".join(flags)
+    return _summary(
+        ticker_ret,
+        market_ret,
+        beta,
+        beta_adjusted,
+        sector_proxy,
+        sector_ret,
+        combined,
+        flag,
+        estimation_end,
+        beta_fallback_used,
+    )
 
 
 def proxy_for_theme(theme: str | None) -> str | None:
@@ -104,11 +122,23 @@ def proxy_for_theme(theme: str | None) -> str | None:
     return None
 
 
-def _summary(raw, market, beta, beta_adj, sector_proxy, sector_ret, combined, quality, beta_estimation_end) -> dict:
+def _summary(
+    raw,
+    market,
+    beta,
+    beta_adj,
+    sector_proxy,
+    sector_ret,
+    combined,
+    quality,
+    beta_estimation_end,
+    beta_fallback_used: bool = False,
+) -> dict:
     return {
         "raw_return": raw,
         "market_return": market,
         "beta": beta,
+        "beta_fallback_used": beta_fallback_used,
         "beta_estimation_end": None if beta_estimation_end is None else pd.Timestamp(beta_estimation_end).isoformat(),
         "beta_adjusted_abnormal_return": beta_adj,
         "sector_proxy": sector_proxy,
