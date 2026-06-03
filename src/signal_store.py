@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parents[1] / "data" / "thesisboard.db"
+DEPRECATED_HIT_FIELD_NOTE = "hit is deprecated; use trade_hit, watch_followthrough, avoided_bad_trade, and false_negative."
 
 
 def utc_now() -> str:
@@ -54,6 +55,7 @@ def init_signal_store(db_path: Path | str = DB_PATH) -> None:
                 max_runup REAL,
                 hit INTEGER,
                 trade_hit INTEGER,
+                watch_followthrough INTEGER,
                 avoided_bad_trade INTEGER,
                 false_negative INTEGER,
                 evaluated_at TEXT NOT NULL,
@@ -62,6 +64,7 @@ def init_signal_store(db_path: Path | str = DB_PATH) -> None:
             """
         )
         _ensure_column(conn, "signal_outcomes", "trade_hit", "INTEGER")
+        _ensure_column(conn, "signal_outcomes", "watch_followthrough", "INTEGER")
         _ensure_column(conn, "signal_outcomes", "avoided_bad_trade", "INTEGER")
         _ensure_column(conn, "signal_outcomes", "false_negative", "INTEGER")
 
@@ -116,20 +119,22 @@ def upsert_signal_outcome(
     db_path: Path | str = DB_PATH,
     hit: bool | None = None,
     trade_hit: bool | None = None,
+    watch_followthrough: bool | None = None,
     avoided_bad_trade: bool | None = None,
     false_negative: bool | None = None,
 ) -> None:
     init_signal_store(db_path)
     hit_value = None if hit is None else int(hit)
     trade_hit_value = None if trade_hit is None else int(trade_hit)
+    watch_followthrough_value = None if watch_followthrough is None else int(watch_followthrough)
     avoided_bad_trade_value = None if avoided_bad_trade is None else int(avoided_bad_trade)
     false_negative_value = None if false_negative is None else int(false_negative)
     with connect(db_path) as conn:
         conn.execute(
             """
             INSERT INTO signal_outcomes
-            (signal_id, forward_return, forward_abnormal_return, max_drawdown, max_runup, hit, trade_hit, avoided_bad_trade, false_negative, evaluated_at, is_matured)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (signal_id, forward_return, forward_abnormal_return, max_drawdown, max_runup, hit, trade_hit, watch_followthrough, avoided_bad_trade, false_negative, evaluated_at, is_matured)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(signal_id) DO UPDATE SET
                 forward_return=excluded.forward_return,
                 forward_abnormal_return=excluded.forward_abnormal_return,
@@ -137,6 +142,7 @@ def upsert_signal_outcome(
                 max_runup=excluded.max_runup,
                 hit=excluded.hit,
                 trade_hit=excluded.trade_hit,
+                watch_followthrough=excluded.watch_followthrough,
                 avoided_bad_trade=excluded.avoided_bad_trade,
                 false_negative=excluded.false_negative,
                 evaluated_at=excluded.evaluated_at,
@@ -150,6 +156,7 @@ def upsert_signal_outcome(
                 max_runup,
                 hit_value,
                 trade_hit_value,
+                watch_followthrough_value,
                 avoided_bad_trade_value,
                 false_negative_value,
                 evaluated_at,
@@ -174,6 +181,7 @@ def list_signal_snapshots(db_path: Path | str = DB_PATH, *, include_outcomes: bo
                     o.max_runup,
                     o.hit,
                     o.trade_hit,
+                    o.watch_followthrough,
                     o.avoided_bad_trade,
                     o.false_negative,
                     o.evaluated_at,
@@ -199,6 +207,7 @@ def list_matured_signal_records(db_path: Path | str = DB_PATH) -> list[dict]:
                 o.max_runup,
                 o.hit,
                 o.trade_hit,
+                o.watch_followthrough,
                 o.avoided_bad_trade,
                 o.false_negative,
                 o.evaluated_at,
@@ -214,7 +223,7 @@ def list_matured_signal_records(db_path: Path | str = DB_PATH) -> list[dict]:
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     item = dict(row)
-    for key in ("hit", "trade_hit", "avoided_bad_trade", "false_negative", "is_matured"):
+    for key in ("hit", "trade_hit", "watch_followthrough", "avoided_bad_trade", "false_negative", "is_matured"):
         if key in item and item[key] is not None:
             item[key] = bool(item[key])
     return item
