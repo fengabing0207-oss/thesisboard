@@ -71,23 +71,27 @@ def abnormal_return_summary(
     sector_prices: pd.Series | None = None,
     sector_proxy: str | None = None,
     lookback_days: int = 120,
+    beta_estimation_end=None,
 ) -> dict:
     ticker_ret = raw_return(ticker_prices, start_date, end_date)
     market_ret = raw_return(benchmark_prices, start_date, end_date)
+    estimation_end = pd.Timestamp(beta_estimation_end) if beta_estimation_end is not None else pd.Timestamp(start_date)
     if ticker_ret is None:
-        return _summary(None, market_ret, None, None, sector_proxy, None, None, "insufficient_price_history")
+        return _summary(None, market_ret, None, None, sector_proxy, None, None, "insufficient_price_history", estimation_end)
     if market_ret is None:
-        return _summary(ticker_ret, None, None, None, sector_proxy, None, None, "missing_benchmark_data")
+        return _summary(ticker_ret, None, None, None, sector_proxy, None, None, "missing_benchmark_data", estimation_end)
 
     ticker_returns = _clean_prices(ticker_prices).pct_change()
     benchmark_returns = _clean_prices(benchmark_prices).pct_change()
+    ticker_returns = _returns_before(ticker_returns, estimation_end)
+    benchmark_returns = _returns_before(benchmark_returns, estimation_end)
     beta = rolling_beta(ticker_returns, benchmark_returns, lookback_days) or 1.0
     beta_adjusted = beta_adjusted_abnormal_return(ticker_ret, beta, market_ret)
 
     sector_ret = raw_return(sector_prices, start_date, end_date) if sector_prices is not None else None
     combined = combined_abnormal_return(ticker_ret, beta, market_ret, sector_ret)
     flag = "ok" if sector_proxy is None or sector_ret is not None else "missing_sector_proxy"
-    return _summary(ticker_ret, market_ret, beta, beta_adjusted, sector_proxy, sector_ret, combined, flag)
+    return _summary(ticker_ret, market_ret, beta, beta_adjusted, sector_proxy, sector_ret, combined, flag, estimation_end)
 
 
 def proxy_for_theme(theme: str | None) -> str | None:
@@ -100,11 +104,12 @@ def proxy_for_theme(theme: str | None) -> str | None:
     return None
 
 
-def _summary(raw, market, beta, beta_adj, sector_proxy, sector_ret, combined, quality) -> dict:
+def _summary(raw, market, beta, beta_adj, sector_proxy, sector_ret, combined, quality, beta_estimation_end) -> dict:
     return {
         "raw_return": raw,
         "market_return": market,
         "beta": beta,
+        "beta_estimation_end": None if beta_estimation_end is None else pd.Timestamp(beta_estimation_end).isoformat(),
         "beta_adjusted_abnormal_return": beta_adj,
         "sector_proxy": sector_proxy,
         "sector_adjusted_abnormal_return": None if raw is None or sector_ret is None else sector_adjusted_abnormal_return(raw, sector_ret),
@@ -121,6 +126,12 @@ def _clean_prices(price_series: pd.Series | None) -> pd.Series:
     if not isinstance(prices.index, pd.DatetimeIndex):
         prices.index = pd.to_datetime(prices.index)
     return prices.sort_index()
+
+
+def _returns_before(returns: pd.Series, end_date) -> pd.Series:
+    cleaned = _clean_prices(returns)
+    timestamp = _normalize_timestamp(pd.Timestamp(end_date), cleaned.index)
+    return cleaned.loc[cleaned.index < timestamp]
 
 
 def _normalize_timestamp(timestamp: pd.Timestamp, index: pd.Index) -> pd.Timestamp:
