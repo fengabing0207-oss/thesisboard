@@ -27,3 +27,13 @@ def test_missing_timestamp_is_inconclusive():
     reaction = classify_event_reaction("positive", 0.04, timestamp_present=False)
     assert reaction.label == INCONCLUSIVE
     assert "Do not make a strong causal claim" in reaction.causal_claim
+
+
+def test_neutral_or_unknown_catalyst_is_inconclusive_without_basket_evidence():
+    reaction = classify_event_reaction("unknown", 0.05)
+    assert reaction.label == INCONCLUSIVE
+
+
+def test_neutral_catalyst_can_classify_with_explicit_basket_evidence():
+    reaction = classify_event_reaction("neutral", 0.05, has_explicit_basket_evidence=True)
+    assert reaction.label == POSITIVE_ABNORMAL_REACTION
