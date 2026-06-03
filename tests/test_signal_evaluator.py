@@ -5,6 +5,7 @@ def test_metrics_use_cohort_base_rate_and_split_hit_semantics():
     records = [
         {"created_at": "2026-01-02", "horizon_days": 5, "classification": "Tradeable", "forward_abnormal_return": 0.04, "trade_hit": True, "is_matured": True},
         {"created_at": "2026-01-02", "horizon_days": 5, "classification": "Tradeable", "forward_abnormal_return": -0.02, "trade_hit": False, "is_matured": True},
+        {"created_at": "2026-01-02", "horizon_days": 5, "classification": "Watch", "forward_abnormal_return": 0.03, "watch_followthrough": True, "false_negative": False, "is_matured": True},
         {"created_at": "2026-01-02", "horizon_days": 5, "classification": "Avoid", "forward_abnormal_return": 0.03, "avoided_bad_trade": False, "false_negative": True, "is_matured": True},
         {"created_at": "2026-01-02", "horizon_days": 5, "classification": "Avoid Chase", "forward_abnormal_return": -0.05, "avoided_bad_trade": True, "false_negative": False, "is_matured": True},
     ]
@@ -16,12 +17,15 @@ def test_metrics_use_cohort_base_rate_and_split_hit_semantics():
 
     metrics = evaluate_signal_records(records, universe_cohort=universe_cohort)
     tradeable_group = next(group for group in metrics["groups"] if group["classification"] == "Tradeable")
+    watch_group = next(group for group in metrics["groups"] if group["classification"] == "Watch")
     avoid_chase_group = next(group for group in metrics["groups"] if group["classification"] == "Avoid Chase")
-    assert metrics["sample_positive_rate"] == 0.5
+    assert metrics["sample_positive_rate"] == 0.6
     assert "base_rate" not in metrics
     assert tradeable_group["trade_hit_rate"] == 0.5
     assert tradeable_group["base_rate"] == 0.5
     assert tradeable_group["excess_trade_hit_rate"] == 0
+    assert watch_group["watch_followthrough_rate"] == 1
+    assert watch_group["false_negatives"] == 0
     assert avoid_chase_group["avoided_bad_trade_rate"] == 1
     assert metrics["false_positives"] == 1
     assert metrics["false_negatives"] == 1
