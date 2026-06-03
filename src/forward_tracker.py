@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -10,8 +9,8 @@ from .horizons import validate_horizon
 from .signal_store import insert_signal_snapshot, list_signal_snapshots, upsert_signal_outcome
 
 
-BULLISH_CLASSIFICATIONS = {"Tradeable", "Watch"}
-AVOID_CLASSIFICATIONS = {"Avoid", "Avoid Chase"}
+TRADEABLE_CLASSIFICATIONS = {"Tradeable"}
+NON_TRADEABLE_CLASSIFICATIONS = {"Avoid", "Avoid Chase", "Wait for Confirmation", "Watch"}
 
 
 def record_signal(
@@ -58,7 +57,15 @@ def evaluate_forward_returns(
 
     for signal in list_signal_snapshots(db_path):
         created_at = pd.Timestamp(signal["created_at"])
-        horizon_end = created_at + timedelta(days=int(signal["horizon_days"]))
+        ticker_prices = prices_by_ticker.get(signal["ticker"])
+        if ticker_prices is None:
+            raise KeyError(f"Missing price history for {signal['ticker']}")
+        horizon_end = trading_session_horizon_end(
+            created_at,
+            int(signal["horizon_days"]),
+            ticker_prices.index,
+            benchmark_prices.index,
+        )
         is_matured = as_of_ts >= horizon_end
         if not is_matured:
             upsert_signal_outcome(
@@ -74,9 +81,6 @@ def evaluate_forward_returns(
             )
             continue
 
-        ticker_prices = prices_by_ticker.get(signal["ticker"])
-        if ticker_prices is None:
-            raise KeyError(f"Missing price history for {signal['ticker']}")
         sector_proxy = signal.get("sector_proxy") or ""
         sector_prices = sector_prices_by_proxy.get(sector_proxy) if sector_proxy else None
         summary = abnormal_return_summary(
@@ -90,7 +94,7 @@ def evaluate_forward_returns(
         forward_return = summary["raw_return"]
         forward_abnormal = summary["combined_abnormal_return"]
         max_drawdown, max_runup = max_drawdown_and_runup(ticker_prices, created_at, horizon_end)
-        hit = classify_hit(signal["classification"], forward_abnormal)
+        outcome = classify_outcome_semantics(signal["classification"], forward_abnormal)
 
         upsert_signal_outcome(
             signal_id=signal["id"],
@@ -98,24 +102,40 @@ def evaluate_forward_returns(
             forward_abnormal_return=forward_abnormal,
             max_drawdown=max_drawdown,
             max_runup=max_runup,
-            hit=hit,
+            hit=outcome["trade_hit"],
+            trade_hit=outcome["trade_hit"],
+            avoided_bad_trade=outcome["avoided_bad_trade"],
+            false_negative=outcome["false_negative"],
             evaluated_at=as_of_ts.isoformat(),
             is_matured=True,
             db_path=db_path,
         )
-        evaluated.append({**signal, **summary, "hit": hit, "max_drawdown": max_drawdown, "max_runup": max_runup})
+        evaluated.append({**signal, **summary, **outcome, "max_drawdown": max_drawdown, "max_runup": max_runup})
 
     return evaluated
 
 
-def classify_hit(classification: str, forward_abnormal_return: float | None) -> bool | None:
+def classify_outcome_semantics(classification: str, forward_abnormal_return: float | None) -> dict:
+    outcome = {"trade_hit": None, "avoided_bad_trade": None, "false_negative": None}
     if forward_abnormal_return is None:
-        return None
-    if classification in BULLISH_CLASSIFICATIONS:
-        return forward_abnormal_return > 0
-    if classification in AVOID_CLASSIFICATIONS:
-        return forward_abnormal_return <= 0
-    return None
+        return outcome
+    if classification in TRADEABLE_CLASSIFICATIONS:
+        outcome["trade_hit"] = forward_abnormal_return > 0
+        outcome["false_negative"] = False
+    elif classification in NON_TRADEABLE_CLASSIFICATIONS:
+        outcome["avoided_bad_trade"] = forward_abnormal_return <= 0
+        outcome["false_negative"] = forward_abnormal_return > 0
+    return outcome
+
+
+def trading_session_horizon_end(created_at, horizon_days: int, *indices: pd.Index) -> pd.Timestamp:
+    validate_horizon(horizon_days)
+    created_ts = pd.Timestamp(created_at)
+    sessions = _combined_sessions(*indices)
+    future_sessions = sessions[sessions > created_ts]
+    if len(future_sessions) < horizon_days:
+        raise ValueError(f"Not enough trading sessions after {created_ts} for {horizon_days}D horizon")
+    return pd.Timestamp(future_sessions[horizon_days - 1])
 
 
 def max_drawdown_and_runup(price_series: pd.Series, start_date, end_date) -> tuple[float | None, float | None]:
@@ -140,3 +160,13 @@ def _latest_timestamp(price_series: pd.Series) -> pd.Timestamp:
     if not isinstance(prices.index, pd.DatetimeIndex):
         prices.index = pd.to_datetime(prices.index)
     return pd.Timestamp(prices.index.max())
+
+
+def _combined_sessions(*indices: pd.Index) -> pd.DatetimeIndex:
+    sessions: list[pd.Timestamp] = []
+    for index in indices:
+        values = pd.DatetimeIndex(pd.to_datetime(index)).dropna()
+        sessions.extend(pd.Timestamp(value) for value in values)
+    if not sessions:
+        raise ValueError("at least one trading-session index is required")
+    return pd.DatetimeIndex(sorted(set(sessions)))
