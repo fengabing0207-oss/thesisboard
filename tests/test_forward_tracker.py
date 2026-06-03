@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from src.forward_tracker import evaluate_forward_returns, record_signal, trading_session_horizon_end
+from src.forward_tracker import classify_outcome_semantics, evaluate_forward_returns, record_signal, trading_session_horizon_end
 from src.signal_store import list_matured_signal_records
 
 
@@ -47,7 +47,7 @@ def test_forward_tracker_uses_trading_sessions_across_weekend(tmp_path):
     ticker_prices = pd.Series([100, 110, 115], index=sessions)
     benchmark_prices = pd.Series([100, 100, 100], index=sessions)
 
-    assert trading_session_horizon_end("2026-01-02", 1, ticker_prices.index, benchmark_prices.index) == pd.Timestamp("2026-01-05")
+    assert trading_session_horizon_end("2026-01-02", 1, benchmark_prices.index) == pd.Timestamp("2026-01-05")
 
     record_signal(
         ticker="NVDA",
@@ -72,3 +72,24 @@ def test_forward_tracker_uses_trading_sessions_across_weekend(tmp_path):
     records = list_matured_signal_records(db_path)
     assert records[0]["forward_return"] == pytest.approx(0.10)
     assert records[0]["trade_hit"] is True
+
+
+def test_horizon_uses_benchmark_sessions_when_ticker_sessions_differ():
+    benchmark_sessions = pd.to_datetime(["2026-01-02", "2026-01-05", "2026-01-06"])
+    ticker_sessions = pd.to_datetime(["2026-01-02", "2026-01-06"])
+
+    assert ticker_sessions[1] != benchmark_sessions[1]
+    assert trading_session_horizon_end("2026-01-02", 1, benchmark_sessions) == pd.Timestamp("2026-01-05")
+
+
+def test_watch_followthrough_is_not_false_negative_but_strong_avoid_outperformance_is():
+    watch = classify_outcome_semantics("Watch", 0.03)
+    mild_avoid = classify_outcome_semantics("Avoid", 0.01)
+    strong_avoid = classify_outcome_semantics("Avoid Chase", 0.04)
+
+    assert watch["watch_followthrough"] is True
+    assert watch["false_negative"] is False
+    assert mild_avoid["avoided_bad_trade"] is False
+    assert mild_avoid["false_negative"] is False
+    assert strong_avoid["avoided_bad_trade"] is False
+    assert strong_avoid["false_negative"] is True
