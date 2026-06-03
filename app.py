@@ -5,6 +5,13 @@ import plotly.express as px
 import streamlit as st
 
 from src.demo_validation_data import EXPLICIT_OUTCOME_FIELDS, prepare_validation_lab_data
+from src.pre_trade_check import (
+    EventType,
+    InstrumentType,
+    Level,
+    PlannedAction,
+    ThesisDecision,
+)
 
 
 SNAPSHOT_COLUMNS = [
@@ -58,10 +65,15 @@ def main() -> None:
     st.title("ThesisBoard")
     st.caption("User-controlled thematic trading research. Validation first, automation later.")
 
-    page = st.sidebar.radio("Pages", ["Home", "Validation Lab", "Methodology", "Roadmap"])
+    page = st.sidebar.radio(
+        "Pages",
+        ["Home", "Pre-Trade Check", "Validation Lab", "Methodology", "Roadmap"],
+    )
 
     if page == "Home":
         render_home()
+    elif page == "Pre-Trade Check":
+        render_pre_trade_check()
     elif page == "Validation Lab":
         render_validation_lab()
     elif page == "Methodology":
@@ -82,6 +94,107 @@ def render_home() -> None:
     )
     st.info("Current branch focus: validation spine, not full AI automation yet.")
     st.warning("ThesisBoard is not financial advice and does not execute trades.")
+
+
+def render_pre_trade_check() -> None:
+    st.header("Pre-Trade Check")
+    st.caption(
+        "A behavioral risk-control checklist to run before entering a trade — not investment advice. "
+        "Fill the core fields in under a minute; everything else is optional."
+    )
+
+    action_options = [member.value for member in PlannedAction]
+    instrument_options = [member.value for member in InstrumentType]
+    event_options = [member.value for member in EventType]
+    level_options = [member.value for member in Level]
+
+    with st.form("pre_trade_check_form"):
+        st.subheader("1) Trade setup")
+        col_a, col_b, col_c = st.columns(3)
+        ticker = col_a.text_input("Ticker", placeholder="e.g. NVDA")
+        planned_action = col_b.selectbox("Planned action", action_options, index=action_options.index("buy"))
+        instrument_type = col_c.selectbox("Instrument", instrument_options, index=instrument_options.index("stock"))
+        col_d, col_e, col_f = st.columns(3)
+        event_type = col_d.selectbox("Event type", event_options, index=event_options.index("earnings"))
+        horizon_days = col_e.number_input("Horizon (trading days)", min_value=1, value=5, step=1)
+        market_expectation = col_f.selectbox(
+            "Market expectation", level_options, index=level_options.index("medium")
+        )
+
+        st.subheader("2) Thesis and risk")
+        entry_thesis = st.text_area("Entry thesis", placeholder="Why enter now?")
+        risk_thesis = st.text_area("Risk thesis", placeholder="What's the bear case / what could go wrong?")
+
+        st.subheader("3) Sizing and discipline")
+        col_g, col_h = st.columns(2)
+        max_loss = col_g.number_input("Max loss you'll accept", min_value=0.0, value=0.0, step=50.0)
+        position_size = col_h.number_input(
+            "Position size (% of portfolio)", min_value=0.0, max_value=100.0, value=0.0, step=0.5
+        )
+        invalidation_rule = st.text_input(
+            "Invalidation rule", placeholder="What would prove this wrong / force an exit?"
+        )
+
+        with st.expander("Advanced / optional context"):
+            theme = st.text_input("Theme", placeholder="(optional) e.g. AI Infrastructure")
+            st.caption("Left blank, theme is recorded as 'unspecified'.")
+            confidence = st.selectbox("Confidence", level_options, index=level_options.index("medium"))
+            notes = st.text_area("Notes", placeholder="(optional)")
+
+        submitted = st.form_submit_button("Build pre-trade check")
+
+    st.info("Risk flagging and verdicts will be added in a later PR.")
+
+    if not submitted:
+        return
+
+    try:
+        decision = ThesisDecision(
+            ticker=ticker,
+            theme=theme.strip() or "unspecified",
+            event_type=event_type,
+            planned_action=planned_action,
+            instrument_type=instrument_type,
+            horizon_days=int(horizon_days),
+            market_expectation=market_expectation,
+            entry_thesis=entry_thesis,
+            risk_thesis=risk_thesis,
+            max_loss=float(max_loss),
+            invalidation_rule=invalidation_rule,
+            confidence=confidence,
+            position_size=float(position_size),
+            notes=notes,
+        )
+    except ValueError as exc:
+        st.error(f"Could not build the pre-trade check: {exc}")
+        return
+
+    st.success("Pre-trade check built for this session (not saved).")
+    _render_decision_summary(decision)
+    st.subheader("Serialized decision (JSON preview)")
+    st.json(decision.to_dict())
+
+
+def _render_decision_summary(decision: ThesisDecision) -> None:
+    st.subheader("Summary")
+    data = decision.to_dict()
+    rows = [
+        ("Ticker", data["ticker"]),
+        ("Planned action", data["planned_action"]),
+        ("Instrument", data["instrument_type"]),
+        ("Event type", data["event_type"]),
+        ("Horizon (days)", data["horizon_days"]),
+        ("Max loss", data["max_loss"]),
+        ("Invalidation rule", data["invalidation_rule"] or "(none)"),
+        ("Position size (%)", data["position_size"]),
+        ("Confidence", data["confidence"]),
+        ("Market expectation", data["market_expectation"]),
+        ("Theme", data["theme"]),
+        ("Status", data["status"]),
+    ]
+    # Stringify the value column so the mixed-type table serializes cleanly.
+    table = pd.DataFrame([(field, "" if value is None else str(value)) for field, value in rows], columns=["Field", "Value"])
+    st.table(table)
 
 
 def render_validation_lab() -> None:
