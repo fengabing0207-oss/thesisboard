@@ -22,3 +22,6 @@ jobs:
 
       - name: Run tests
         run: python -m pytest
+
+      - name: Run validation demo
+        run: python scripts/run_validation_demo.py
