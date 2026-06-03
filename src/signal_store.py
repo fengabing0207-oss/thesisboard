@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import DB_PATH
+DB_PATH = Path(__file__).resolve().parents[1] / "data" / "thesisboard.db"
 
 
 def utc_now() -> str:
