@@ -278,3 +278,209 @@ class CSVPriceProvider:
             source=self.name,
             adjustment=self.adjustment,
         )
+
+
+class YFinancePriceProvider:
+    """Fetches split/dividend-adjusted EOD closes from Yahoo Finance (PR #15B).
+
+    Uses ``auto_adjust=True`` so the returned ``Close`` is already adjusted; the
+    declared ``adjustment`` is ``"auto_adjust"``. A single instance is meant to
+    serve every symbol in one validation run (signal tickers, the benchmark, and
+    sector ETFs), so the bundle's single-source / single-adjustment invariant
+    holds automatically.
+
+    LOOKBACK REMINDER: with real data, request ``start`` at least ~120 trading
+    days BEFORE the earliest signal date. With less history, rolling beta cannot
+    be estimated and silently falls back to 1.0, distorting abnormal returns
+    without raising. Automatic detection of this is deferred to PR #15C.
+
+    ``yfinance`` is imported lazily inside :meth:`_fetch_close_frames` so this
+    module stays importable (and the offline test suite stays green) without the
+    dependency present.
+    """
+
+    name = "yfinance"
+    adjustment = "auto_adjust"
+
+    def get_history(self, symbols: Sequence[str], start, end) -> PriceDataBundle:
+        requested = [str(symbol).strip().upper() for symbol in symbols]
+        raw = self._fetch_close_frames(requested, start, end)
+        universe = {
+            str(symbol).strip().upper(): normalize_price_series(series)
+            for symbol, series in raw.items()
+        }
+        return assemble_bundle(
+            universe=universe,
+            symbols=requested,
+            start=start,
+            end=end,
+            source=self.name,
+            adjustment=self.adjustment,
+        )
+
+    def _fetch_close_frames(self, symbols: Sequence[str], start, end) -> dict[str, pd.Series]:
+        """Return ``{symbol: adjusted-close Series}`` from yfinance.
+
+        This is the network seam; offline tests monkeypatch it, and the only
+        test that exercises the real call is marked ``network`` and skipped by
+        default. yfinance's ``end`` is exclusive, so it is bumped by one day.
+        """
+        import yfinance  # lazy import; see class docstring
+
+        requested = [str(symbol).strip().upper() for symbol in symbols]
+        frame = yfinance.download(
+            tickers=requested,
+            start=pd.Timestamp(start).normalize().date().isoformat(),
+            end=(pd.Timestamp(end).normalize() + pd.Timedelta(days=1)).date().isoformat(),
+            auto_adjust=True,
+            progress=False,
+            group_by="ticker",
+            threads=False,
+        )
+
+        frames: dict[str, pd.Series] = {}
+        if frame is None or frame.empty:
+            return frames
+
+        columns = frame.columns
+        for symbol in requested:
+            close = None
+            if isinstance(columns, pd.MultiIndex):
+                if symbol in columns.get_level_values(0):
+                    block = frame[symbol]
+                    if "Close" in block.columns:
+                        close = block["Close"]
+                elif "Close" in columns.get_level_values(0):
+                    close_block = frame["Close"]
+                    if symbol in getattr(close_block, "columns", []):
+                        close = close_block[symbol]
+            elif "Close" in columns:
+                close = frame["Close"]
+
+            if close is not None:
+                close = close.dropna()
+                if not close.empty:
+                    frames[symbol] = close
+        return frames
+
+
+class CachingPriceProvider:
+    """Transparent cache-first decorator over any :class:`PriceProvider`.
+
+    Cache identity is ``(symbol, start, end, snapshot_id)``. A hit requires an
+    exact match on all four — in particular a cached window will NOT serve a
+    request for a different window. ``snapshot_id`` pins a pull: reusing the same
+    id makes a backtest reproducible even though the upstream source may
+    re-adjust history over time; an unpinned provider defaults to the fetch date,
+    so distinct days are distinct, non-overwriting snapshots.
+
+    Snapshots are stored as per-symbol long-format CSVs::
+
+        <cache_dir>/<snapshot_id>/<SYMBOL>__<start>__<end>.csv
+
+    which are themselves replayable offline via :class:`CSVPriceProvider`.
+    """
+
+    def __init__(self, inner, cache_dir: Path | str, *, snapshot_id: str | None = None):
+        self._inner = inner
+        self._cache_dir = Path(cache_dir)
+        self._snapshot_id = snapshot_id
+        self.name = inner.name
+        self.adjustment = inner.adjustment
+
+    def get_history(self, symbols: Sequence[str], start, end) -> PriceDataBundle:
+        snapshot_id = self._resolve_snapshot_id()
+        start_key = pd.Timestamp(start).normalize().date().isoformat()
+        end_key = pd.Timestamp(end).normalize().date().isoformat()
+
+        requested: list[str] = []
+        seen: set[str] = set()
+        for raw_symbol in symbols:
+            symbol = str(raw_symbol).strip().upper()
+            if symbol not in seen:
+                seen.add(symbol)
+                requested.append(symbol)
+
+        universe: dict[str, pd.Series] = {}
+        misses: list[str] = []
+        for symbol in requested:
+            path = self._cache_file(snapshot_id, symbol, start_key, end_key)
+            if path.exists():
+                universe[symbol] = self._read_cache(path, symbol)
+            else:
+                misses.append(symbol)
+
+        if misses:
+            fetched = self._inner.get_history(misses, start, end)
+            for symbol in misses:
+                series = fetched.prices.get(symbol)
+                if series is None or series.empty:
+                    continue  # do not cache misses; they re-fetch next time
+                self._write_cache(self._cache_file(snapshot_id, symbol, start_key, end_key), symbol, series)
+                universe[symbol] = series
+
+        return assemble_bundle(
+            universe=universe,
+            symbols=requested,
+            start=start,
+            end=end,
+            source=self.name,
+            adjustment=self.adjustment,
+        )
+
+    def _resolve_snapshot_id(self) -> str:
+        if self._snapshot_id is not None:
+            return str(self._snapshot_id)
+        from datetime import date
+
+        return date.today().isoformat()
+
+    def _cache_file(self, snapshot_id: str, symbol: str, start_key: str, end_key: str) -> Path:
+        return self._cache_dir / snapshot_id / f"{symbol}__{start_key}__{end_key}.csv"
+
+    def _read_cache(self, path: Path, symbol: str) -> pd.Series:
+        frame = pd.read_csv(path)
+        series = pd.Series(frame["adjusted_close"].to_numpy(), index=frame["date"].to_numpy(), name=symbol)
+        return normalize_price_series(series)
+
+    def _write_cache(self, path: Path, symbol: str, series: pd.Series) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        out = pd.DataFrame(
+            {
+                "symbol": symbol,
+                "date": [pd.Timestamp(value).date().isoformat() for value in series.index],
+                "adjusted_close": series.to_numpy(),
+            }
+        )
+        out.to_csv(path, index=False)
+
+
+def get_price_provider(
+    name: str = "demo",
+    *,
+    path: Path | str | None = None,
+    cache_dir: Path | str | None = None,
+    snapshot_id: str | None = None,
+):
+    """Opt-in factory for price providers; defaults to the offline demo provider.
+
+    Pass ``cache_dir`` to wrap the chosen provider in a :class:`CachingPriceProvider`.
+    Only ``"demo"`` requires no configuration; ``"csv"`` needs ``path=``.
+    """
+    key = (name or "demo").lower()
+    if key == "demo":
+        from .demo_validation_data import default_demo_provider
+
+        provider = default_demo_provider()
+    elif key == "csv":
+        if path is None:
+            raise ValueError("csv provider requires path=")
+        provider = CSVPriceProvider(path)
+    elif key == "yfinance":
+        provider = YFinancePriceProvider()
+    else:
+        raise ValueError(f"unknown price provider: {name!r}")
+
+    if cache_dir is not None:
+        provider = CachingPriceProvider(provider, cache_dir, snapshot_id=snapshot_id)
+    return provider
