@@ -10,7 +10,11 @@ from .signal_store import insert_signal_snapshot, list_signal_snapshots, upsert_
 
 
 TRADEABLE_CLASSIFICATIONS = {"Tradeable"}
-NON_TRADEABLE_CLASSIFICATIONS = {"Avoid", "Avoid Chase", "Wait for Confirmation", "Watch"}
+WATCH_CLASSIFICATIONS = {"Watch", "Wait for Confirmation"}
+AVOID_CLASSIFICATIONS = {"Avoid", "Avoid Chase"}
+
+TRADING_SESSION_CALENDAR = "benchmark"
+FALSE_NEGATIVE_ABNORMAL_THRESHOLD = 0.02
 
 
 def record_signal(
@@ -63,7 +67,6 @@ def evaluate_forward_returns(
         horizon_end = trading_session_horizon_end(
             created_at,
             int(signal["horizon_days"]),
-            ticker_prices.index,
             benchmark_prices.index,
         )
         is_matured = as_of_ts >= horizon_end
@@ -104,6 +107,7 @@ def evaluate_forward_returns(
             max_runup=max_runup,
             hit=outcome["trade_hit"],
             trade_hit=outcome["trade_hit"],
+            watch_followthrough=outcome["watch_followthrough"],
             avoided_bad_trade=outcome["avoided_bad_trade"],
             false_negative=outcome["false_negative"],
             evaluated_at=as_of_ts.isoformat(),
@@ -115,23 +119,38 @@ def evaluate_forward_returns(
     return evaluated
 
 
-def classify_outcome_semantics(classification: str, forward_abnormal_return: float | None) -> dict:
-    outcome = {"trade_hit": None, "avoided_bad_trade": None, "false_negative": None}
+def classify_outcome_semantics(
+    classification: str,
+    forward_abnormal_return: float | None,
+    *,
+    false_negative_threshold: float = FALSE_NEGATIVE_ABNORMAL_THRESHOLD,
+) -> dict:
+    outcome = {"trade_hit": None, "watch_followthrough": None, "avoided_bad_trade": None, "false_negative": None}
     if forward_abnormal_return is None:
         return outcome
     if classification in TRADEABLE_CLASSIFICATIONS:
         outcome["trade_hit"] = forward_abnormal_return > 0
         outcome["false_negative"] = False
-    elif classification in NON_TRADEABLE_CLASSIFICATIONS:
+    elif classification in WATCH_CLASSIFICATIONS:
+        outcome["watch_followthrough"] = forward_abnormal_return > 0
+        outcome["false_negative"] = False
+    elif classification in AVOID_CLASSIFICATIONS:
         outcome["avoided_bad_trade"] = forward_abnormal_return <= 0
-        outcome["false_negative"] = forward_abnormal_return > 0
+        outcome["false_negative"] = forward_abnormal_return > false_negative_threshold
     return outcome
 
 
-def trading_session_horizon_end(created_at, horizon_days: int, *indices: pd.Index) -> pd.Timestamp:
+def trading_session_horizon_end(created_at, horizon_days: int, benchmark_index: pd.Index) -> pd.Timestamp:
+    """Return the Nth benchmark trading session after creation.
+
+    ThesisBoard uses the benchmark calendar as the canonical market-session
+    calendar. Ticker data can have missing sessions, but horizons should still
+    mean N market sessions after the signal, not N calendar days or N rows of
+    potentially sparse ticker data.
+    """
     validate_horizon(horizon_days)
     created_ts = pd.Timestamp(created_at)
-    sessions = _combined_sessions(*indices)
+    sessions = _sessions_from_index(benchmark_index)
     future_sessions = sessions[sessions > created_ts]
     if len(future_sessions) < horizon_days:
         raise ValueError(f"Not enough trading sessions after {created_ts} for {horizon_days}D horizon")
@@ -162,11 +181,8 @@ def _latest_timestamp(price_series: pd.Series) -> pd.Timestamp:
     return pd.Timestamp(prices.index.max())
 
 
-def _combined_sessions(*indices: pd.Index) -> pd.DatetimeIndex:
-    sessions: list[pd.Timestamp] = []
-    for index in indices:
-        values = pd.DatetimeIndex(pd.to_datetime(index)).dropna()
-        sessions.extend(pd.Timestamp(value) for value in values)
-    if not sessions:
+def _sessions_from_index(index: pd.Index) -> pd.DatetimeIndex:
+    values = pd.DatetimeIndex(pd.to_datetime(index)).dropna()
+    if len(values) == 0:
         raise ValueError("at least one trading-session index is required")
-    return pd.DatetimeIndex(sorted(set(sessions)))
+    return pd.DatetimeIndex(sorted(set(pd.Timestamp(value) for value in values)))
