@@ -171,12 +171,15 @@ def test_bundle_series_are_consumable_by_the_engine():
 
 
 class _CountingProvider:
-    """Wraps a DemoPriceProvider and counts get_history calls (cache testing)."""
+    """Wraps a DemoPriceProvider and counts get_history calls (cache testing).
 
-    name = "demo"
-    adjustment = "demo-synthetic"
+    ``name`` / ``adjustment`` are configurable so cache partitioning by source
+    and adjustment can be exercised.
+    """
 
-    def __init__(self, universe):
+    def __init__(self, universe, name="demo", adjustment="demo-synthetic"):
+        self.name = name
+        self.adjustment = adjustment
         self._inner = DemoPriceProvider(universe)
         self.calls = 0
 
@@ -230,7 +233,7 @@ def test_caching_provider_serves_second_call_from_cache(tmp_path):
 
     assert inner.calls == 1  # second call is a cache hit
     assert "SPY" in first.prices and "SPY" in second.prices
-    files = list((tmp_path / "cache" / "2026-06-03").glob("SPY__*.csv"))
+    files = list((tmp_path / "cache" / "demo" / "demo-synthetic" / "2026-06-03").glob("SPY__*.csv"))
     assert len(files) == 1
 
 
@@ -258,8 +261,8 @@ def test_caching_provider_snapshots_do_not_overwrite(tmp_path):
     c1.get_history(["SPY"], START, END)
     c2.get_history(["SPY"], START, END)
 
-    assert (tmp_path / "cache" / "2026-06-03").exists()
-    assert (tmp_path / "cache" / "2026-06-04").exists()
+    assert (tmp_path / "cache" / "demo" / "demo-synthetic" / "2026-06-03").exists()
+    assert (tmp_path / "cache" / "demo" / "demo-synthetic" / "2026-06-04").exists()
     assert inner.calls == 2
 
 
@@ -268,12 +271,31 @@ def test_cache_file_is_replayable_long_csv(tmp_path):
     cache = CachingPriceProvider(inner, tmp_path / "cache", snapshot_id="snap")
     cache.get_history(["SPY"], START, END)
 
-    cached = next((tmp_path / "cache" / "snap").glob("SPY__*.csv"))
+    cached = next((tmp_path / "cache" / "demo" / "demo-synthetic" / "snap").glob("SPY__*.csv"))
     assert {"symbol", "date", "adjusted_close"} <= set(pd.read_csv(cached).columns)
 
     replay = CSVPriceProvider(cached).get_history(["SPY"], START, END)
     assert "SPY" in replay.prices
     assert replay.prices["SPY"].loc["2026-01-02"] == 101.0
+
+
+def test_caching_provider_separates_by_source_and_adjustment(tmp_path):
+    universe = _two_point_universe()
+    cache_dir = tmp_path / "cache"
+
+    first = _CountingProvider(universe, name="demo", adjustment="demo-synthetic")
+    CachingPriceProvider(first, cache_dir, snapshot_id="snap").get_history(["SPY"], START, END)
+    assert first.calls == 1
+
+    # Same cache_dir / snapshot_id / symbol / window, but a different provider:
+    # it must NOT replay the first provider's cache.
+    second = _CountingProvider(universe, name="yfinance", adjustment="auto_adjust")
+    bundle = CachingPriceProvider(second, cache_dir, snapshot_id="snap").get_history(["SPY"], START, END)
+
+    assert second.calls == 1  # fetched separately, did not hit demo's cache
+    assert bundle.source == "yfinance" and bundle.adjustment == "auto_adjust"
+    assert (cache_dir / "demo" / "demo-synthetic" / "snap").exists()
+    assert (cache_dir / "yfinance" / "auto_adjust" / "snap").exists()
 
 
 def test_get_price_provider_factory(tmp_path):

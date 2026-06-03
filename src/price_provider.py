@@ -364,6 +364,11 @@ class YFinancePriceProvider:
         return frames
 
 
+def _safe_path_part(value: str) -> str:
+    """Make a string safe to use as a single path component."""
+    return "".join(char if char.isalnum() or char in "-._" else "_" for char in str(value)) or "_"
+
+
 class CachingPriceProvider:
     """Transparent cache-first decorator over any :class:`PriceProvider`.
 
@@ -374,9 +379,14 @@ class CachingPriceProvider:
     re-adjust history over time; an unpinned provider defaults to the fetch date,
     so distinct days are distinct, non-overwriting snapshots.
 
+    The cache is also partitioned by the inner provider's source and adjustment
+    convention, so the same ``cache_dir`` / ``snapshot_id`` / symbol / window can
+    never replay one source's data under a different provider (e.g. a demo cache
+    served as ``source="yfinance"`` / ``adjustment="auto_adjust"``).
+
     Snapshots are stored as per-symbol long-format CSVs::
 
-        <cache_dir>/<snapshot_id>/<SYMBOL>__<start>__<end>.csv
+        <cache_dir>/<source>/<adjustment>/<snapshot_id>/<SYMBOL>__<start>__<end>.csv
 
     which are themselves replayable offline via :class:`CSVPriceProvider`.
     """
@@ -436,7 +446,13 @@ class CachingPriceProvider:
         return date.today().isoformat()
 
     def _cache_file(self, snapshot_id: str, symbol: str, start_key: str, end_key: str) -> Path:
-        return self._cache_dir / snapshot_id / f"{symbol}__{start_key}__{end_key}.csv"
+        return (
+            self._cache_dir
+            / _safe_path_part(self.name)
+            / _safe_path_part(self.adjustment)
+            / snapshot_id
+            / f"{symbol}__{start_key}__{end_key}.csv"
+        )
 
     def _read_cache(self, path: Path, symbol: str) -> pd.Series:
         frame = pd.read_csv(path)
