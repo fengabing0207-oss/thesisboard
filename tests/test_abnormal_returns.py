@@ -53,3 +53,21 @@ def test_beta_estimation_ignores_future_returns_after_signal_start():
 
     assert summary["beta"] == pytest.approx(1)
     assert summary["beta_estimation_end"] == pd.Timestamp(start_date).isoformat()
+
+
+def test_beta_fallback_flag_when_history_is_insufficient():
+    dates = pd.date_range("2026-01-01", periods=10)
+    ticker_prices = pd.Series([100, 101, 102, 103, 104, 105, 106, 107, 108, 109], index=dates)
+    benchmark_prices = pd.Series([100, 100.5, 101, 101.2, 101.4, 101.8, 102, 102.1, 102.2, 102.3], index=dates)
+
+    summary = abnormal_return_summary(
+        ticker_prices=ticker_prices,
+        benchmark_prices=benchmark_prices,
+        start_date=dates[4],
+        end_date=dates[7],
+        lookback_days=30,
+    )
+
+    assert summary["beta"] == 1.0
+    assert summary["beta_fallback_used"] is True
+    assert "beta_fallback_used" in summary["data_quality_flag"]
