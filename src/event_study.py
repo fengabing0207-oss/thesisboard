@@ -26,6 +26,7 @@ def classify_event_reaction(
     timestamp_present: bool = True,
     data_granularity: str = "daily",
     material_threshold: float = 0.01,
+    has_explicit_basket_evidence: bool = False,
 ) -> EventReaction:
     """Classify event reaction from abnormal return, not raw return."""
     if abnormal_return is None or not timestamp_present:
@@ -42,6 +43,14 @@ def classify_event_reaction(
         if data_granularity.lower() in {"daily", "daily-only", "end_of_day"}
         else "Timestamped event evidence; still validate with forward tracking."
     )
+
+    if sentiment == "neutral" and not has_explicit_basket_evidence:
+        return EventReaction(
+            label=INCONCLUSIVE,
+            abnormal_return=abnormal_return,
+            causal_claim=causal_claim,
+            reason="Neutral or unknown catalyst without explicit basket/theme evidence.",
+        )
 
     if abs(abnormal_return) < material_threshold:
         return EventReaction(
@@ -65,10 +74,10 @@ def classify_event_reaction(
         reason = "Negative catalyst aligned with negative abnormal return."
     elif abnormal_return > 0:
         label = POSITIVE_ABNORMAL_REACTION
-        reason = "Abnormal return was positive, but catalyst polarity was neutral or unknown."
+        reason = "Abnormal return was positive with explicit basket/theme evidence."
     else:
         label = NEGATIVE_ABNORMAL_REACTION
-        reason = "Abnormal return was negative, but catalyst polarity was neutral or unknown."
+        reason = "Abnormal return was negative with explicit basket/theme evidence."
 
     return EventReaction(label=label, abnormal_return=abnormal_return, causal_claim=causal_claim, reason=reason)
 
