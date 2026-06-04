@@ -12,6 +12,7 @@ venv/
 Library/
 *.db
 data/*.db
+data/*.jsonl
 data/price_cache/
 cache/
 *.db-journal
