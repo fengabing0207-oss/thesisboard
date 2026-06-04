@@ -78,3 +78,45 @@ def test_creates_directory_on_first_save(tmp_path):
     append_record(decision=decision, evaluation=evaluation, journal_path=path)
     assert path.exists()
     assert len(load_records(path)) == 1
+
+
+def test_market_context_round_trips_with_notes(tmp_path):
+    path = tmp_path / "journal.jsonl"
+    decision, evaluation = _record_inputs()
+    context = {
+        "market_regime_note": "VIX elevated, risk-off",
+        "sector_theme_note": "",
+        "ticker_context_note": "extended above 50dma",
+        "event_risk_note": "earnings in 3 days",
+        "options_flow_note": "",
+        "source_checked_at": "2026-06-04T00:00:00+00:00",
+    }
+    append_record(decision=decision, evaluation=evaluation, market_context=context, journal_path=path)
+
+    records = load_records(path)
+    assert records[0]["market_context"] == context
+    assert records[0]["market_context"]["market_regime_note"] == "VIX elevated, risk-off"
+
+
+def test_market_context_defaults_to_none(tmp_path):
+    path = tmp_path / "journal.jsonl"
+    decision, evaluation = _record_inputs()
+    append_record(decision=decision, evaluation=evaluation, journal_path=path)
+    assert load_records(path)[0]["market_context"] is None
+
+
+def test_empty_market_context_notes_still_save(tmp_path):
+    path = tmp_path / "journal.jsonl"
+    decision, evaluation = _record_inputs()
+    context = {field: "" for field in (
+        "market_regime_note",
+        "sector_theme_note",
+        "ticker_context_note",
+        "event_risk_note",
+        "options_flow_note",
+    )}
+    context["source_checked_at"] = "2026-06-04T00:00:00+00:00"
+    append_record(decision=decision, evaluation=evaluation, market_context=context, journal_path=path)
+
+    records = load_records(path)
+    assert records[0]["market_context"] == context  # empty strings preserved, no crash

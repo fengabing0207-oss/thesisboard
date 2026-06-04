@@ -84,3 +84,18 @@ def test_pre_trade_page_runs_evaluator_on_submit():
     assert not at.exception
     subheaders = [s.value for s in at.subheader]
     assert "Heuristic risk check" in subheaders
+
+
+def test_pre_trade_page_shows_market_context_panel_and_snapshot():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file("app.py", default_timeout=30).run()
+    at.sidebar.radio[0].set_value("Pre-Trade Check").run()
+    at.text_input[0].set_value("nvda")
+    at.text_area[0].set_value("demand strong")
+    [b for b in at.button if "Build" in b.label][0].click().run()
+
+    assert not at.exception
+    subheaders = [s.value for s in at.subheader]
+    assert "Market context sources" in subheaders
+    assert "Market context snapshot (optional)" in subheaders

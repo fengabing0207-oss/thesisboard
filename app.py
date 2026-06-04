@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 from src.demo_validation_data import EXPLICIT_OUTCOME_FIELDS, prepare_validation_lab_data
 from src.journal import append_record, load_records
+from src.market_sources import (
+    CATEGORY_LABELS,
+    CATEGORY_ORDER,
+    PANEL_CAUTIONS,
+    SNAPSHOT_NOTE_FIELDS,
+    sources_for_category,
+)
 from src.pre_trade_check import (
     EventType,
     InstrumentType,
@@ -197,11 +206,56 @@ def _render_built_result(result: dict) -> None:
     st.success("Pre-trade check built for this session.")
     _render_decision_summary(result["decision"])
     _render_risk_output(result["evaluation"])
+    _render_market_context_panel(result["decision"].get("ticker", ""))
+    snapshot = _render_market_context_snapshot()
     st.subheader("Serialized decision (JSON preview)")
     st.json(result["decision"])
     if st.button("Save this record"):
-        append_record(decision=result["decision"], evaluation=result["evaluation"])
+        append_record(
+            decision=result["decision"],
+            evaluation=result["evaluation"],
+            market_context=_finalize_snapshot(snapshot),
+        )
         st.success("Saved to journal.")
+
+
+def _render_market_context_panel(ticker: str) -> None:
+    st.subheader("Market context sources")
+    st.caption("Independent reference links — open in a new tab. No data is fetched.")
+    for line in PANEL_CAUTIONS:
+        st.caption("⚠️ " + line)
+    for category in CATEGORY_ORDER:
+        sources = sources_for_category(category)
+        if not sources:
+            continue
+        st.markdown(f"**{CATEGORY_LABELS[category]}**")
+        columns = st.columns(len(sources))
+        for column, source in zip(columns, sources):
+            column.link_button(
+                source.name,
+                source.resolve_url(ticker),
+                help=f"{source.best_for} — caution: {source.caution}",
+                use_container_width=True,
+            )
+
+
+def _render_market_context_snapshot() -> dict:
+    st.subheader("Market context snapshot (optional)")
+    st.caption("Record what you actually observed in the sources above. All fields optional.")
+    labels = {
+        "market_regime_note": "Market regime note",
+        "sector_theme_note": "Sector / theme note",
+        "ticker_context_note": "Ticker context note",
+        "event_risk_note": "Event risk note",
+        "options_flow_note": "Options / volatility note",
+    }
+    return {field: st.text_input(labels[field], key=f"mc_{field}") for field in SNAPSHOT_NOTE_FIELDS}
+
+
+def _finalize_snapshot(snapshot: dict) -> dict:
+    cleaned = {field: (snapshot.get(field) or "").strip() for field in SNAPSHOT_NOTE_FIELDS}
+    cleaned["source_checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return cleaned
 
 
 def _render_saved_journal() -> None:

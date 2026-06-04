@@ -23,12 +23,15 @@ def append_record(
     *,
     decision: dict,
     evaluation: dict,
+    market_context: dict | None = None,
     journal_path: Path | str = JOURNAL_PATH,
     saved_at: str | None = None,
 ) -> dict:
-    """Append one record (decision + evaluation + saved_at) as a JSON line.
+    """Append one record (decision + evaluation + market_context + saved_at).
 
-    Creates the directory/file on first save. Returns the written record.
+    ``market_context`` is the optional manual snapshot of what the user observed
+    in the reference sources; None when nothing was recorded. Creates the
+    directory/file on first save. Returns the written record.
     """
     path = Path(journal_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,6 +39,7 @@ def append_record(
         "saved_at": saved_at or _utc_now_iso(),
         "decision": decision,
         "evaluation": evaluation,
+        "market_context": market_context,
     }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
