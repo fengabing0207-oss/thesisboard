@@ -5,6 +5,7 @@ import plotly.express as px
 import streamlit as st
 
 from src.demo_validation_data import EXPLICIT_OUTCOME_FIELDS, prepare_validation_lab_data
+from src.journal import append_record, load_records
 from src.pre_trade_check import (
     EventType,
     InstrumentType,
@@ -145,56 +146,94 @@ def render_pre_trade_check() -> None:
 
         submitted = st.form_submit_button("Build pre-trade check")
 
-    if not submitted:
+    if submitted:
+        try:
+            decision = ThesisDecision(
+                ticker=ticker,
+                theme=theme.strip() or "unspecified",
+                event_type=event_type,
+                planned_action=planned_action,
+                instrument_type=instrument_type,
+                horizon_days=int(horizon_days),
+                market_expectation=market_expectation,
+                entry_thesis=entry_thesis,
+                risk_thesis=risk_thesis,
+                max_loss=float(max_loss),
+                invalidation_rule=invalidation_rule,
+                confidence=confidence,
+                position_size=float(position_size),
+                notes=notes,
+            )
+        except ValueError as exc:
+            st.error(f"Could not build the pre-trade check: {exc}")
+            st.session_state.pop("pretrade_last_result", None)
+        else:
+            # max_loss in this form is an unlabeled amount, so the % -> implied-move
+            # arithmetic stays off; the checkbox feeds the runtime high_runup signal.
+            flags, verdict = evaluate_pre_trade_risk(decision, high_runup=bool(high_runup))
+            st.session_state["pretrade_last_result"] = {
+                "decision": decision.to_dict(),
+                "evaluation": {
+                    "verdict": verdict.verdict.value,
+                    "active_risk_flags": flags.active(),
+                    "reasons": list(verdict.reasons),
+                    "heuristic_only": True,
+                    "not_financial_advice": True,
+                },
+            }
+
+    # Persisted across reruns so the separate Save button (a fresh run) still has
+    # the last-built result to write.
+    result = st.session_state.get("pretrade_last_result")
+    if result is None:
         st.caption("A heuristic risk check appears after you build the decision.")
-        return
+    else:
+        _render_built_result(result)
 
-    try:
-        decision = ThesisDecision(
-            ticker=ticker,
-            theme=theme.strip() or "unspecified",
-            event_type=event_type,
-            planned_action=planned_action,
-            instrument_type=instrument_type,
-            horizon_days=int(horizon_days),
-            market_expectation=market_expectation,
-            entry_thesis=entry_thesis,
-            risk_thesis=risk_thesis,
-            max_loss=float(max_loss),
-            invalidation_rule=invalidation_rule,
-            confidence=confidence,
-            position_size=float(position_size),
-            notes=notes,
-        )
-    except ValueError as exc:
-        st.error(f"Could not build the pre-trade check: {exc}")
-        return
+    _render_saved_journal()
 
-    # max_loss in this form is an unlabeled amount, so the % -> implied-move
-    # arithmetic stays off; the checkbox feeds the runtime high_runup signal.
-    flags, verdict = evaluate_pre_trade_risk(decision, high_runup=bool(high_runup))
 
-    st.success("Pre-trade check built for this session (not saved).")
-    _render_decision_summary(decision)
-    _render_risk_output(flags, verdict)
+def _render_built_result(result: dict) -> None:
+    st.success("Pre-trade check built for this session.")
+    _render_decision_summary(result["decision"])
+    _render_risk_output(result["evaluation"])
     st.subheader("Serialized decision (JSON preview)")
-    st.json(decision.to_dict())
+    st.json(result["decision"])
+    if st.button("Save this record"):
+        append_record(decision=result["decision"], evaluation=result["evaluation"])
+        st.success("Saved to journal.")
 
 
-def _render_risk_output(flags, verdict) -> None:
+def _render_saved_journal() -> None:
+    st.subheader("Saved records")
+    records = load_records()
+    if not records:
+        st.caption("No records yet. Build a check and click Save to start your journal.")
+        return
+    rows = [
+        {
+            "saved_at": record.get("saved_at", ""),
+            "ticker": record.get("decision", {}).get("ticker", ""),
+            "verdict": record.get("evaluation", {}).get("verdict", ""),
+        }
+        for record in records
+    ]
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+
+def _render_risk_output(evaluation: dict) -> None:
     st.subheader("Heuristic risk check")
     st.caption("Heuristic behavioral check only — not financial advice and not a predictive signal.")
-    st.write(f"**Verdict:** `{verdict.verdict.value}`")
-    active = flags.active()
+    st.write(f"**Verdict:** `{evaluation['verdict']}`")
+    active = evaluation.get("active_risk_flags", [])
     st.write("**Risk flags:** " + (", ".join(active) if active else "none"))
     st.write("**Reasons:**")
-    for reason in verdict.reasons:
+    for reason in evaluation.get("reasons", []):
         st.markdown(f"- {reason}")
 
 
-def _render_decision_summary(decision: ThesisDecision) -> None:
+def _render_decision_summary(data: dict) -> None:
     st.subheader("Summary")
-    data = decision.to_dict()
     rows = [
         ("Ticker", data["ticker"]),
         ("Planned action", data["planned_action"]),
