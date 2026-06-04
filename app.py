@@ -11,6 +11,7 @@ from src.pre_trade_check import (
     Level,
     PlannedAction,
     ThesisDecision,
+    evaluate_pre_trade_risk,
 )
 
 
@@ -120,6 +121,7 @@ def render_pre_trade_check() -> None:
         market_expectation = col_f.selectbox(
             "Market expectation", level_options, index=level_options.index("medium")
         )
+        high_runup = st.checkbox("Recent large run-up / possible chase?")
 
         st.subheader("2) Thesis and risk")
         entry_thesis = st.text_area("Entry thesis", placeholder="Why enter now?")
@@ -143,9 +145,8 @@ def render_pre_trade_check() -> None:
 
         submitted = st.form_submit_button("Build pre-trade check")
 
-    st.info("Risk flagging and verdicts will be added in a later PR.")
-
     if not submitted:
+        st.caption("A heuristic risk check appears after you build the decision.")
         return
 
     try:
@@ -169,10 +170,26 @@ def render_pre_trade_check() -> None:
         st.error(f"Could not build the pre-trade check: {exc}")
         return
 
+    # max_loss in this form is an unlabeled amount, so the % -> implied-move
+    # arithmetic stays off; the checkbox feeds the runtime high_runup signal.
+    flags, verdict = evaluate_pre_trade_risk(decision, high_runup=bool(high_runup))
+
     st.success("Pre-trade check built for this session (not saved).")
     _render_decision_summary(decision)
+    _render_risk_output(flags, verdict)
     st.subheader("Serialized decision (JSON preview)")
     st.json(decision.to_dict())
+
+
+def _render_risk_output(flags, verdict) -> None:
+    st.subheader("Heuristic risk check")
+    st.caption("Heuristic behavioral check only — not financial advice and not a predictive signal.")
+    st.write(f"**Verdict:** `{verdict.verdict.value}`")
+    active = flags.active()
+    st.write("**Risk flags:** " + (", ".join(active) if active else "none"))
+    st.write("**Reasons:**")
+    for reason in verdict.reasons:
+        st.markdown(f"- {reason}")
 
 
 def _render_decision_summary(decision: ThesisDecision) -> None:

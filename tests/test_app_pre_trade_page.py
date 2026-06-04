@@ -66,3 +66,21 @@ def test_decision_summary_renders_without_streamlit_runtime():
     )
     data = decision.to_dict()
     assert {"ticker", "planned_action", "status", "invalidation_rule"} <= set(data)
+
+
+def test_pre_trade_page_runs_evaluator_on_submit():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file("app.py", default_timeout=30).run()
+    at.sidebar.radio[0].set_value("Pre-Trade Check").run()
+
+    # the manual run-up checkbox is present in the core form
+    assert any("run-up" in cb.label.lower() for cb in at.checkbox)
+
+    at.text_input[0].set_value("nvda")
+    at.text_area[0].set_value("demand strong")
+    at.get("button")[-1].click().run()
+
+    assert not at.exception
+    subheaders = [s.value for s in at.subheader]
+    assert "Heuristic risk check" in subheaders
