@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from src import market_news
 from src.demo_validation_data import EXPLICIT_OUTCOME_FIELDS, prepare_validation_lab_data
 from src.journal import append_record, load_records
 from src.pre_trade_check import (
@@ -69,13 +70,15 @@ def main() -> None:
 
     page = st.sidebar.radio(
         "Pages",
-        ["Home", "Pre-Trade Check", "Validation Lab", "Methodology", "Roadmap"],
+        ["Home", "Pre-Trade Check", "Market News", "Validation Lab", "Methodology", "Roadmap"],
     )
 
     if page == "Home":
         render_home()
     elif page == "Pre-Trade Check":
         render_pre_trade_check()
+    elif page == "Market News":
+        render_market_news()
     elif page == "Validation Lab":
         render_validation_lab()
     elif page == "Methodology":
@@ -251,6 +254,120 @@ def _render_decision_summary(data: dict) -> None:
     # Stringify the value column so the mixed-type table serializes cleanly.
     table = pd.DataFrame([(field, "" if value is None else str(value)) for field, value in rows], columns=["Field", "Value"])
     st.table(table)
+
+
+def render_market_news() -> None:
+    st.header("Market News")
+    st.caption("Market context only, not a buy/sell signal.")
+
+    ticker = st.text_input("Ticker", placeholder="e.g. NVDA").strip().upper()
+
+    _render_market_news_snapshot(ticker)
+    normalized = _render_market_news_headlines(ticker)
+    _render_market_news_ai_summary(normalized)
+
+
+def _render_market_news_snapshot(ticker: str) -> None:
+    st.subheader("Market snapshot")
+    symbols = list(market_news.MARKET_SYMBOLS) + ([ticker] if ticker else [])
+    try:
+        prices = market_news.fetch_market_prices(symbols)
+    except Exception:
+        st.info("Market snapshot unavailable: could not load price data from yfinance.")
+        return
+
+    snapshot = market_news.build_market_snapshot(prices, ticker=ticker or None)
+
+    columns = st.columns(len(market_news.MARKET_SYMBOLS))
+    for column, symbol in zip(columns, market_news.MARKET_SYMBOLS):
+        info = snapshot["market"][symbol]
+        label = market_news.MARKET_LABELS.get(symbol, symbol)
+        if not info.get("available"):
+            column.metric(label, "n/a")
+            column.caption("Unavailable")
+            continue
+        column.metric(label, f"{info['latest']:.2f}")
+        column.line_chart(info["series"].tail(63), height=120)
+
+    if not ticker:
+        st.caption("Enter a ticker above for ticker-specific context.")
+        return
+
+    metrics = snapshot["ticker"]
+    if not metrics or not metrics.get("available"):
+        st.info(f"No price data available for {ticker} from yfinance.")
+        return
+
+    st.markdown(f"**{ticker}**")
+    st.line_chart(metrics["series"].tail(63), height=180)
+    row = st.columns(4)
+    row[0].metric("5D return", _fmt_pct(metrics["return_5d"]))
+    row[1].metric("20D return", _fmt_pct(metrics["return_20d"]))
+    row[2].metric("60D return", _fmt_pct(metrics["return_60d"]))
+    row[3].metric("From recent high", _fmt_pct(metrics["distance_from_high"]))
+
+    _render_next_earnings(ticker)
+
+
+def _render_next_earnings(ticker: str) -> None:
+    try:
+        earnings_date = market_news.fetch_next_earnings_date(ticker)
+    except Exception:
+        earnings_date = None
+    if earnings_date is None:
+        st.caption("Next earnings: unavailable.")
+        return
+    days = market_news.days_until(earnings_date)
+    when = "" if days is None else f" (~{days}d)"
+    st.caption(f"Next earnings: {str(earnings_date.date())}{when}")
+
+
+def _render_market_news_headlines(ticker: str) -> list:
+    st.subheader("News headlines")
+    if not ticker:
+        st.caption("Enter a ticker above to load recent headlines.")
+        return []
+    try:
+        raw = market_news.fetch_ticker_news(ticker)
+    except Exception:
+        raw = []
+    normalized = market_news.normalize_news(raw)
+    if not normalized:
+        st.write("No recent news available from yfinance.")
+        return []
+
+    for item in normalized:
+        title = item.get("title") or "(no title)"
+        meta_parts = [part for part in (item.get("publisher"), item.get("timestamp")) if part]
+        meta = " · ".join(meta_parts)
+        st.markdown(f"**{title}**")
+        if meta:
+            st.caption(meta)
+        if item.get("link"):
+            st.link_button("Open original", item["link"])
+    return normalized
+
+
+def _render_market_news_ai_summary(normalized_news: list) -> None:
+    st.subheader("AI topic summary")
+    st.caption(
+        "Topic summary of public headlines only — not sentiment prediction, not investment advice. "
+        "Headlines can mislead; read the originals."
+    )
+    headlines = market_news.headlines_from_news(normalized_news)
+    if not headlines:
+        st.info("AI topic summary unavailable: no headlines to summarize.")
+        return
+    if not market_news.anthropic_api_key_available():
+        st.info("AI topic summary unavailable: no local Anthropic API key is configured.")
+        return
+    try:
+        client = market_news.get_anthropic_client()
+        summary = market_news.summarize_headlines(headlines, client=client)
+    except Exception:
+        st.info("AI topic summary unavailable: could not reach the local Anthropic API.")
+        return
+    st.write(summary)
 
 
 def render_validation_lab() -> None:
