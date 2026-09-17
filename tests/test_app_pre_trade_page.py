@@ -1,9 +1,6 @@
-"""Lightweight tests for the Pre-Trade Check page wiring (PR #18).
+"""Tests for the Pre-Trade Check page wiring (PR #18)."""
 
-These do not drive Streamlit; they confirm the app module imports cleanly and
-that a ThesisDecision can be built from representative form values (core fields
-filled, advanced left at their defaults).
-"""
+from pathlib import Path
 
 
 def test_app_module_imports_with_pre_trade_page():
@@ -71,7 +68,8 @@ def test_decision_summary_renders_without_streamlit_runtime():
 def test_pre_trade_page_runs_evaluator_on_submit():
     from streamlit.testing.v1 import AppTest
 
-    at = AppTest.from_file("app.py", default_timeout=30).run()
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    at = AppTest.from_file(str(app_path), default_timeout=30).run()
     at.sidebar.radio[0].set_value("Pre-Trade Check").run()
 
     # the manual run-up checkbox is present in the core form
