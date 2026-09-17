@@ -4,11 +4,14 @@ import pandas as pd
 from src.news_signal_lab import (
     MODEL_VERSION,
     NUMERIC_FEATURES,
+    TREE_MODEL_VERSION,
     availability_session,
     build_news_return_dataset,
+    compare_walk_forward_models,
     extract_headline_features,
     session_close_utc,
     walk_forward_baseline,
+    walk_forward_tree_challenger,
 )
 
 
@@ -178,3 +181,39 @@ def test_walk_forward_refuses_unusable_rows():
     result = walk_forward_baseline(frame, min_train_rows=2, min_train_sessions=2)
     assert result["status"] == "no_usable_matured_rows"
     assert result["predictions"].empty
+
+
+def test_tree_challenger_uses_same_chronological_guards():
+    result = walk_forward_tree_challenger(
+        _walk_forward_frame(),
+        min_train_rows=6,
+        min_train_sessions=6,
+    )
+
+    assert result["status"] == "ok"
+    assert result["model_version"] == TREE_MODEL_VERSION
+    predictions = result["predictions"]
+    assert not predictions.empty
+    assert (predictions["train_label_cutoff"] < predictions["test_close_at"]).all()
+
+
+def test_model_comparison_uses_identical_oos_rows():
+    result = compare_walk_forward_models(
+        _walk_forward_frame(),
+        min_train_rows=6,
+        min_train_sessions=6,
+    )
+
+    assert result["status"] == "ok"
+    logistic_keys = set(
+        result["common_predictions"]["logistic"][["ticker", "signal_session"]].itertuples(
+            index=False, name=None
+        )
+    )
+    tree_keys = set(
+        result["common_predictions"]["random_forest"][["ticker", "signal_session"]].itertuples(
+            index=False, name=None
+        )
+    )
+    assert logistic_keys == tree_keys
+    assert set(result["comparison"]["model"]) == {"logistic", "random_forest"}

@@ -27,7 +27,10 @@ from .forward_tracker import trading_session_horizon_end
 MARKET_TIMEZONE = "America/New_York"
 REGULAR_CLOSE = time(16, 0)
 AVAILABILITY_RULE_VERSION = "observed-to-regular-close.v1"
-MODEL_VERSION = "tfidf-vader-logit.v1"
+LOGISTIC_MODEL_VERSION = "tfidf-vader-logit.v1"
+TREE_MODEL_VERSION = "tfidf-vader-random-forest.v1"
+# Backward-compatible name for callers of the original baseline.
+MODEL_VERSION = LOGISTIC_MODEL_VERSION
 NUMERIC_FEATURES = [
     "news_count",
     "title_char_mean",
@@ -271,6 +274,117 @@ def walk_forward_baseline(
     inside the training window.
     """
 
+    return _walk_forward_model(
+        dataset,
+        pipeline_factory=_logistic_pipeline,
+        model_version=LOGISTIC_MODEL_VERSION,
+        min_train_rows=min_train_rows,
+        min_train_sessions=min_train_sessions,
+        random_state=random_state,
+    )
+
+
+def walk_forward_tree_challenger(
+    dataset: pd.DataFrame,
+    *,
+    min_train_rows: int = 30,
+    min_train_sessions: int = 10,
+    random_state: int = 42,
+) -> dict:
+    """Run a constrained random-forest challenger on the same feature set."""
+
+    return _walk_forward_model(
+        dataset,
+        pipeline_factory=_tree_pipeline,
+        model_version=TREE_MODEL_VERSION,
+        min_train_rows=min_train_rows,
+        min_train_sessions=min_train_sessions,
+        random_state=random_state,
+    )
+
+
+def compare_walk_forward_models(
+    dataset: pd.DataFrame,
+    *,
+    min_train_rows: int = 30,
+    min_train_sessions: int = 10,
+    random_state: int = 42,
+) -> dict:
+    """Compare the linear baseline and tree challenger on identical OOS rows."""
+
+    results = {
+        "logistic": walk_forward_baseline(
+            dataset,
+            min_train_rows=min_train_rows,
+            min_train_sessions=min_train_sessions,
+            random_state=random_state,
+        ),
+        "random_forest": walk_forward_tree_challenger(
+            dataset,
+            min_train_rows=min_train_rows,
+            min_train_sessions=min_train_sessions,
+            random_state=random_state,
+        ),
+    }
+    successful = {
+        name: result for name, result in results.items() if result["status"] == "ok"
+    }
+    if len(successful) != len(results):
+        return {
+            "status": "model_run_incomplete",
+            "models": results,
+            "common_predictions": {},
+            "comparison": pd.DataFrame(),
+        }
+
+    key_columns = ["ticker", "signal_session"]
+    common_keys: set[tuple] | None = None
+    for result in successful.values():
+        keys = set(
+            result["predictions"][key_columns]
+            .itertuples(index=False, name=None)
+        )
+        common_keys = keys if common_keys is None else common_keys & keys
+    if not common_keys:
+        return {
+            "status": "no_common_oos_predictions",
+            "models": results,
+            "common_predictions": {},
+            "comparison": pd.DataFrame(),
+        }
+
+    common_predictions: dict[str, pd.DataFrame] = {}
+    comparison_rows: list[dict] = []
+    for name, result in successful.items():
+        predictions = result["predictions"].copy()
+        keys = list(predictions[key_columns].itertuples(index=False, name=None))
+        predictions = predictions.loc[[key in common_keys for key in keys]].reset_index(drop=True)
+        common_predictions[name] = predictions
+        metrics = _prediction_metrics(predictions)
+        comparison_rows.append(
+            {
+                "model": name,
+                "model_version": result["model_version"],
+                **metrics,
+            }
+        )
+    return {
+        "status": "ok",
+        "models": results,
+        "common_predictions": common_predictions,
+        "comparison": pd.DataFrame(comparison_rows),
+    }
+
+
+def _walk_forward_model(
+    dataset: pd.DataFrame,
+    *,
+    pipeline_factory,
+    model_version: str,
+    min_train_rows: int,
+    min_train_sessions: int,
+    random_state: int,
+) -> dict:
     required = {
         "signal_session",
         "label_available_at",
@@ -287,7 +401,7 @@ def walk_forward_baseline(
     frame = dataset.loc[dataset["usable_for_model"].fillna(False)].copy()
     frame = frame.dropna(subset=["label_available_at", "target_positive", "target_abnormal_return"])
     if frame.empty:
-        return _empty_walk_forward("no_usable_matured_rows")
+        return _empty_walk_forward("no_usable_matured_rows", model_version=model_version)
     frame["signal_session"] = pd.to_datetime(frame["signal_session"]).dt.normalize()
     frame["label_available_at"] = pd.to_datetime(frame["label_available_at"], utc=True)
     frame["target_positive"] = frame["target_positive"].astype(int)
@@ -307,7 +421,7 @@ def walk_forward_baseline(
             skipped_sessions.append(pd.Timestamp(test_session).date().isoformat())
             continue
 
-        pipeline = _baseline_pipeline(random_state=random_state)
+        pipeline = pipeline_factory(random_state=random_state)
         try:
             pipeline.fit(train, train["target_positive"])
             probabilities = pipeline.predict_proba(test)[:, 1]
@@ -322,7 +436,10 @@ def walk_forward_baseline(
                     "ticker": source["ticker"],
                     "signal_session": source["signal_session"],
                     "target_positive": int(source["target_positive"]),
+                    "target_raw_return": source.get("target_raw_return"),
                     "target_abnormal_return": float(source["target_abnormal_return"]),
+                    "horizon_end": source.get("horizon_end"),
+                    "label_available_at": source["label_available_at"],
                     "predicted_probability": float(probability),
                     "predicted_positive": int(probability >= 0.5),
                     "historical_positive_rate": train_positive_rate,
@@ -331,30 +448,31 @@ def walk_forward_baseline(
                     "train_sessions": int(train["signal_session"].nunique()),
                     "train_label_cutoff": train_cutoff,
                     "test_close_at": test_close,
-                    "model_version": MODEL_VERSION,
+                    "model_version": model_version,
                 }
             )
 
     result = pd.DataFrame(predictions)
     if result.empty:
-        empty = _empty_walk_forward("insufficient_chronological_training_history")
+        empty = _empty_walk_forward(
+            "insufficient_chronological_training_history", model_version=model_version
+        )
         empty["skipped_sessions"] = skipped_sessions
         return empty
     metrics = _prediction_metrics(result)
     return {
         "status": "ok",
-        "model_version": MODEL_VERSION,
+        "model_version": model_version,
         "predictions": result,
         "metrics": metrics,
         "skipped_sessions": skipped_sessions,
     }
 
 
-def _baseline_pipeline(*, random_state: int):
+def _feature_pipeline(model):
     from sklearn.compose import ColumnTransformer
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.impute import SimpleImputer
-    from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
 
@@ -380,21 +498,35 @@ def _baseline_pipeline(*, random_state: int):
             ("numeric", numeric, NUMERIC_FEATURES),
         ]
     )
-    return Pipeline(
-        [
-            ("features", features),
-            (
-                "model",
-                LogisticRegression(
-                    C=1.0,
-                    class_weight="balanced",
-                    max_iter=1_000,
-                    random_state=random_state,
-                    solver="liblinear",
-                ),
-            ),
-        ]
+    return Pipeline([("features", features), ("model", model)])
+
+
+def _logistic_pipeline(*, random_state: int):
+    from sklearn.linear_model import LogisticRegression
+
+    model = LogisticRegression(
+        C=1.0,
+        class_weight="balanced",
+        max_iter=1_000,
+        random_state=random_state,
+        solver="liblinear",
     )
+    return _feature_pipeline(model)
+
+
+def _tree_pipeline(*, random_state: int):
+    from sklearn.ensemble import RandomForestClassifier
+
+    model = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=6,
+        min_samples_leaf=3,
+        max_features="sqrt",
+        class_weight="balanced_subsample",
+        random_state=random_state,
+        n_jobs=1,
+    )
+    return _feature_pipeline(model)
 
 
 def _prediction_metrics(predictions: pd.DataFrame) -> dict:
@@ -442,10 +574,10 @@ def _unlabeled_row(row: dict, flag: str, *, horizon_end=None) -> dict:
     }
 
 
-def _empty_walk_forward(status: str) -> dict:
+def _empty_walk_forward(status: str, *, model_version: str = MODEL_VERSION) -> dict:
     return {
         "status": status,
-        "model_version": MODEL_VERSION,
+        "model_version": model_version,
         "predictions": pd.DataFrame(),
         "metrics": {},
         "skipped_sessions": [],

@@ -11,7 +11,7 @@ The application has seven pages:
 - **Home** — product scope and research constraints.
 - **Pre-Trade Check** — structured thesis capture, heuristic risk checks, and an append-only local journal.
 - **Market News** — a yfinance market snapshot, raw ticker headlines, and an optional Anthropic topic summary.
-- **News Signal Lab** — immutable first-seen headline capture, close-to-close target construction, and a chronological TF-IDF/VADER baseline.
+- **News Signal Lab** — immutable first-seen headline capture, close-to-close targets, common-window linear/tree comparison, and a validation-selected event-policy audit.
 - **Validation Lab** — horizon-specific signal outcomes, abnormal returns, hit rates, and cohort base-rate comparisons.
 - **Methodology** — the reasoning behind the validation design.
 - **Roadmap** — planned evidence and automation layers.
@@ -53,7 +53,8 @@ The current methodological focus is validation before automation:
 - Validation Lab currently uses synthetic demo signals to demonstrate the workflow; it does not establish predictive power.
 - Market News depends on best-effort yfinance data and is not a complete point-in-time historical news archive.
 - News Signal Lab starts collecting availability history only when the user captures headlines; vendor timestamps are never treated as proof that an article was historically available to ThesisBoard.
-- The first News Signal Lab model is a research baseline, not a strategy backtest. It does not optimize a trading threshold or claim cost-adjusted alpha.
+- News Signal Lab selects a model/threshold only on a purged validation segment, then reports a later held-out event audit. Re-running after viewing the test makes it exploratory.
+- Cost-adjusted event returns are not portfolio P&L or turnover; the app has no stateful position-book backtest and makes no alpha claim.
 - The first News Signal Lab UI uses a SPY beta-adjusted target; ticker-specific sector-proxy mappings remain an engine-level option.
 - The optional Anthropic output summarizes only the displayed headlines and can be unavailable when no local API key is configured.
 - The app does not deploy a forecasting model or generate live trade instructions.
