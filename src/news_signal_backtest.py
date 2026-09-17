@@ -13,9 +13,75 @@ import numpy as np
 import pandas as pd
 
 from .news_signal_policy import evaluate_event_policy, select_and_evaluate_holdout_policy
+from .strategy_spec import (
+    CALCULATION_CONTRACT_VERSION,
+    StrategySpec,
+    audit_calculation_parity,
+)
 
 
 BACKTEST_VERSION = "equal-weight-overlap-aware.v1"
+
+
+def run_strategy_spec_backtest(
+    predictions: pd.DataFrame,
+    *,
+    prices_by_ticker: dict[str, pd.Series],
+    benchmark_prices: pd.Series,
+    strategy_spec: StrategySpec,
+    start_session=None,
+    book_start_session=None,
+    book_end_session=None,
+) -> dict:
+    """Run the sole position-book engine from an immutable StrategySpec."""
+
+    tickers = {
+        str(value).strip().upper()
+        for value in predictions.get("ticker", pd.Series(dtype=str)).dropna()
+    }
+    outside_universe = sorted(tickers - set(strategy_spec.universe))
+    if outside_universe:
+        raise ValueError(
+            "predictions contain tickers outside StrategySpec universe: "
+            + ", ".join(outside_universe)
+        )
+    contract_fields = {
+        "model_name": strategy_spec.model_name,
+        "model_version": strategy_spec.model_version,
+        "availability_rule_version": strategy_spec.availability_rule_version,
+        "target_definition": strategy_spec.target_definition,
+    }
+    for field, expected in contract_fields.items():
+        actual = _single_contract_value(predictions, field)
+        if actual != expected:
+            raise ValueError(
+                f"prediction {field} does not match StrategySpec: {actual!r} != {expected!r}"
+            )
+    inferred_horizon = _infer_horizon_sessions(predictions, benchmark_prices)
+    if inferred_horizon != int(strategy_spec.holding_horizon_sessions):
+        raise ValueError(
+            "prediction horizon does not match StrategySpec: "
+            f"{inferred_horizon} != {strategy_spec.holding_horizon_sessions}"
+        )
+
+    result = run_long_only_position_backtest(
+        predictions,
+        prices_by_ticker=prices_by_ticker,
+        benchmark_prices=benchmark_prices,
+        probability_threshold=strategy_spec.probability_threshold,
+        one_way_cost_bps=strategy_spec.one_way_cost_bps,
+        start_session=start_session,
+        book_start_session=book_start_session,
+        book_end_session=book_end_session,
+    )
+    result.update(
+        {
+            "strategy_spec": strategy_spec.to_dict(),
+            "strategy_spec_id": strategy_spec.spec_id,
+            "calculation_contract_version": CALCULATION_CONTRACT_VERSION,
+        }
+    )
+    return result
 
 
 def run_long_only_position_backtest(
@@ -203,6 +269,8 @@ def select_and_evaluate_holdout_strategy(
     max_validation_selection_rate: float = 0.50,
     max_validation_average_daily_turnover: float = 1.0,
     one_way_cost_bps: float = 5.0,
+    benchmark_symbol: str = "SPY",
+    universe: Iterable[str] | None = None,
 ) -> dict:
     """Choose model/threshold on validation portfolio results, then lock test."""
 
@@ -225,6 +293,8 @@ def select_and_evaluate_holdout_strategy(
         return {
             "status": split["status"],
             "backtest_version": BACKTEST_VERSION,
+            "availability_audit": split.get("availability_audit", {}),
+            "chronological_windows": split.get("chronological_windows", {}),
             "candidates": split.get("candidates", pd.DataFrame()),
         }
     event_candidates = split["candidates"].copy()
@@ -232,6 +302,8 @@ def select_and_evaluate_holdout_strategy(
         return {
             "status": "no_eligible_validation_strategy",
             "backtest_version": BACKTEST_VERSION,
+            "availability_audit": split.get("availability_audit", {}),
+            "chronological_windows": split.get("chronological_windows", {}),
             "candidates": event_candidates,
         }
 
@@ -243,22 +315,47 @@ def select_and_evaluate_holdout_strategy(
     validation_end = pd.Timestamp(reference_validation["horizon_end"].max())
     test_start = pd.Timestamp(split["first_test_session"])
     test_end = pd.Timestamp(reference_test["horizon_end"].max())
+    combined_reference = pd.concat([reference_validation, reference_test], ignore_index=True)
+    horizon_sessions = _infer_horizon_sessions(combined_reference, benchmark_prices)
+    inferred_universe = tuple(
+        sorted(combined_reference["ticker"].astype(str).str.upper().unique())
+    )
+    declared_universe = tuple(universe) if universe is not None else inferred_universe
 
     strategy_rows: list[dict] = []
     validation_backtests: dict[tuple[str, float], dict] = {}
+    strategy_specs: dict[tuple[str, float], StrategySpec] = {}
     for candidate in event_candidates.loc[event_candidates["eligible"]].to_dict("records"):
         model = str(candidate["model"])
         threshold = float(candidate["probability_threshold"])
-        backtest = run_long_only_position_backtest(
+        candidate_reference = pd.concat(
+            [validation_frames[model], test_frames[model]], ignore_index=True
+        )
+        strategy_spec = StrategySpec(
+            model_name=model,
+            model_version=_single_contract_value(candidate_reference, "model_version"),
+            probability_threshold=threshold,
+            holding_horizon_sessions=horizon_sessions,
+            universe=declared_universe,
+            benchmark=benchmark_symbol,
+            one_way_cost_bps=one_way_cost_bps,
+            availability_rule_version=_single_contract_value(
+                candidate_reference, "availability_rule_version"
+            ),
+            target_definition=_single_contract_value(
+                candidate_reference, "target_definition"
+            ),
+        )
+        backtest = run_strategy_spec_backtest(
             validation_frames[model],
             prices_by_ticker=prices_by_ticker,
             benchmark_prices=benchmark_prices,
-            probability_threshold=threshold,
-            one_way_cost_bps=one_way_cost_bps,
+            strategy_spec=strategy_spec,
             book_start_session=validation_start,
             book_end_session=validation_end,
         )
         validation_backtests[(model, threshold)] = backtest
+        strategy_specs[(model, threshold)] = strategy_spec
         metrics = backtest.get("metrics", {})
         average_turnover = metrics.get("average_daily_turnover")
         turnover_eligible = (
@@ -286,6 +383,8 @@ def select_and_evaluate_holdout_strategy(
         return {
             "status": "no_eligible_validation_strategy",
             "backtest_version": BACKTEST_VERSION,
+            "availability_audit": split.get("availability_audit", {}),
+            "chronological_windows": split.get("chronological_windows", {}),
             "candidates": candidates,
         }
 
@@ -301,14 +400,20 @@ def select_and_evaluate_holdout_strategy(
     ).iloc[0]
     model = str(chosen["model"])
     threshold = float(chosen["probability_threshold"])
-    test_backtest = run_long_only_position_backtest(
+    strategy_spec = strategy_specs[(model, threshold)]
+    test_backtest = run_strategy_spec_backtest(
         test_frames[model],
         prices_by_ticker=prices_by_ticker,
         benchmark_prices=benchmark_prices,
-        probability_threshold=threshold,
-        one_way_cost_bps=one_way_cost_bps,
+        strategy_spec=strategy_spec,
         book_start_session=test_start,
         book_end_session=test_end,
+    )
+    parity_audit = audit_calculation_parity(
+        {
+            "validation": validation_backtests[(model, threshold)],
+            "held_out_test": test_backtest,
+        }
     )
     if test_backtest["status"] != "ok":
         return {
@@ -316,14 +421,23 @@ def select_and_evaluate_holdout_strategy(
             "backtest_version": BACKTEST_VERSION,
             "chosen_model": model,
             "probability_threshold": threshold,
+            "strategy_spec": strategy_spec.to_dict(),
+            "strategy_spec_id": strategy_spec.spec_id,
+            "calculation_parity_audit": parity_audit,
             "test_backtest": test_backtest,
             "candidates": candidates,
         }
     return {
         "status": "ok",
         "backtest_version": BACKTEST_VERSION,
+        "split_version": split["split_version"],
         "chosen_model": model,
         "probability_threshold": threshold,
+        "strategy_spec": strategy_spec.to_dict(),
+        "strategy_spec_id": strategy_spec.spec_id,
+        "calculation_parity_audit": parity_audit,
+        "availability_audit": split["availability_audit"],
+        "chronological_windows": split["chronological_windows"],
         "one_way_cost_bps": float(one_way_cost_bps),
         "max_validation_average_daily_turnover": float(
             max_validation_average_daily_turnover
@@ -351,6 +465,44 @@ def select_and_evaluate_holdout_strategy(
 def _compound(returns: pd.Series) -> float:
     values = returns.astype(float)
     return float(np.prod(1.0 + values) - 1.0)
+
+
+def _infer_horizon_sessions(
+    predictions: pd.DataFrame,
+    benchmark_prices: pd.Series,
+) -> int:
+    required = {"signal_session", "horizon_end"}
+    missing = sorted(required - set(predictions.columns))
+    if missing:
+        raise ValueError(f"predictions are missing required columns: {missing}")
+    frame = predictions.dropna(subset=list(required)).copy()
+    if frame.empty:
+        raise ValueError("cannot infer a holding horizon from empty predictions")
+    frame["signal_session"] = _normalize_dates(frame["signal_session"])
+    frame["horizon_end"] = _normalize_dates(frame["horizon_end"])
+    benchmark = _clean_prices(benchmark_prices)
+    positions = {session: index for index, session in enumerate(benchmark.index)}
+    horizons = set()
+    for row in frame[["signal_session", "horizon_end"]].itertuples(index=False):
+        if row.signal_session not in positions or row.horizon_end not in positions:
+            raise ValueError("prediction horizon sessions must exist on the benchmark calendar")
+        horizons.add(positions[row.horizon_end] - positions[row.signal_session])
+    if len(horizons) != 1 or next(iter(horizons)) < 1:
+        raise ValueError("predictions must use one positive benchmark-session horizon")
+    return int(next(iter(horizons)))
+
+
+def _single_contract_value(frame: pd.DataFrame, column: str) -> str:
+    if column not in frame.columns:
+        raise ValueError(f"predictions are missing required contract column: {column}")
+    values = {
+        str(value).strip()
+        for value in frame[column].dropna().tolist()
+        if str(value).strip()
+    }
+    if len(values) != 1:
+        raise ValueError(f"predictions must contain exactly one {column}")
+    return next(iter(values))
 
 
 def _normalize_dates(values) -> pd.Series:

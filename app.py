@@ -534,6 +534,25 @@ def render_news_signal_lab() -> None:
         )
         return
 
+    feature_audit = comparison["feature_availability_audit"]
+    prediction_audit = comparison["prediction_availability_audit"]
+    st.subheader("Point-in-time leakage audit")
+    audit_row = st.columns(4)
+    audit_row[0].metric("Feature audit", feature_audit["status"])
+    audit_row[1].metric("Feature rows", feature_audit["row_count"])
+    audit_row[2].metric("Prediction audit", prediction_audit["status"])
+    audit_row[3].metric("Leakage violations", prediction_audit["violation_count"])
+    st.caption(
+        "Every feature row is tied to an as-of close and immutable data-vintage hash. OOS predictions "
+        "must use features observed before that close, training labels known before the test close, and "
+        "targets that mature strictly afterward. A failed audit stops policy selection."
+    )
+    with st.expander("Availability audit details"):
+        st.write("Feature snapshot checks")
+        st.dataframe(feature_audit["checks"], width="stretch", hide_index=True)
+        st.write("Walk-forward prediction checks")
+        st.dataframe(prediction_audit["checks"], width="stretch", hide_index=True)
+
     st.subheader("Common-window OOS diagnostics")
     display = comparison["comparison"][
         [
@@ -569,6 +588,7 @@ def render_news_signal_lab() -> None:
         max_validation_selection_rate=max_selection_rate,
         max_validation_average_daily_turnover=max_daily_turnover,
         one_way_cost_bps=round_trip_cost_bps / 2.0,
+        universe=tickers,
     )
     if policy["status"] != "ok":
         st.info(
@@ -578,23 +598,37 @@ def render_news_signal_lab() -> None:
         return
 
     values = policy["test_event"]
-    row = st.columns(4)
+    row = st.columns(5)
     row[0].metric("Validation-selected model", policy["chosen_model"])
     row[1].metric("Locked threshold", f"{policy['probability_threshold']:.2f}")
     row[2].metric("Held-out selected events", values["selected_count"])
     row[3].metric("Held-out mean net event return", _fmt_pct(values["mean_net_abnormal_return"]))
+    row[4].metric("Rule parity", policy["calculation_parity_audit"]["status"])
+    windows = policy["chronological_windows"]
+    validation_window = windows["validation"]
+    test_window = windows["test"]
     st.caption(
         f"Selection used {policy['validation_session_count']} validation sessions; evaluation used "
         f"{policy['test_session_count']} later sessions. {policy['purged_validation_rows']} boundary rows "
         f"were purged because their labels were unavailable at the first test close. Candidate policies "
         f"had to stay below {_fmt_rate(max_selection_rate)} selection and "
-        f"{_fmt_rate(max_daily_turnover)} average daily turnover."
+        f"{_fmt_rate(max_daily_turnover)} average daily turnover. The validation window was "
+        f"{pd.Timestamp(validation_window['start_session']).date()}–"
+        f"{pd.Timestamp(validation_window['end_session']).date()}; the untouched test window began "
+        f"{pd.Timestamp(test_window['start_session']).date()}."
     )
     st.warning(
         "Model and threshold maximize validation-period net return relative to exposure-matched SPY, subject "
         "to the frequency and turnover limits. Re-running after viewing the held-out result makes that test "
         "exploratory; a production claim needs a preregistered policy and a new untouched time period."
     )
+    with st.expander("Locked StrategySpec and calculation parity"):
+        st.code(policy["strategy_spec_id"])
+        st.json(policy["strategy_spec"])
+        st.caption(
+            "Validation and held-out books share this exact spec ID, backtest version, and calculation "
+            "contract. This is research/holdout calculation parity, not proof of live execution parity."
+        )
     with st.expander("Validation candidate audit"):
         st.dataframe(policy["candidates"], width="stretch", hide_index=True)
 

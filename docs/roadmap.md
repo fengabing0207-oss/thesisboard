@@ -17,9 +17,12 @@
 - Purged validation-only model/threshold selection with frequency and turnover constraints.
 - Locked equal-weight position book with overlap-aware turnover and one-way costs.
 - Repeatable watchlist collection with immutable collection-run audits and ticker-level coverage diagnostics.
+- Hashed as-of feature vintages plus fail-closed feature/label leakage audits.
+- Versioned rule-based `StrategySpec` shared by validation and held-out calculation paths.
+- Explicit expanding-training, purged-validation, and later-test window metadata.
 - Event reaction tables.
 - Guardrails around daily-data causality.
-- Future: verified historical-news adapter, delayed execution variants, and preregistered evaluation on newly accumulated data.
+- Future: verified historical-news adapter, delayed execution variants, calibration/stability/subgroup diagnostics, and preregistered evaluation on newly accumulated data.
 
 ## V2: Agentic Theme Classification And Semantic Expansion
 

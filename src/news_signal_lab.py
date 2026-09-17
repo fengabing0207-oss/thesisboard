@@ -15,6 +15,8 @@ split and prevents overlapping forward horizons from leaking into training.
 from __future__ import annotations
 
 from datetime import time
+import hashlib
+import json
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -22,6 +24,10 @@ import pandas as pd
 
 from .abnormal_returns import abnormal_return_summary
 from .forward_tracker import trading_session_horizon_end
+from .news_signal_validation import (
+    audit_feature_availability,
+    audit_prediction_availability,
+)
 
 
 MARKET_TIMEZONE = "America/New_York"
@@ -167,18 +173,25 @@ def build_news_return_dataset(
     }
 
     for (ticker, signal_session), item_versions in sorted(grouped.items()):
-        items = list(item_versions.values())
+        items = sorted(item_versions.values(), key=_item_sort_key)
         titles = [str(item["title"]).strip() for item in items if str(item.get("title", "")).strip()]
         features = extract_headline_features(titles, analyzer=analyzer)
         row = {
             "ticker": ticker,
             "signal_session": signal_session,
             "signal_close_at": session_close_utc(signal_session),
+            "as_of_timestamp": session_close_utc(signal_session),
             "first_seen_at_min": min(pd.Timestamp(item["first_seen_at"]) for item in items),
             "first_seen_at_max": max(pd.Timestamp(item["first_seen_at"]) for item in items),
+            "data_vintage": _data_vintage(items),
             "document": " [SEP] ".join(titles),
             "horizon_days": int(horizon_days),
             "availability_rule_version": AVAILABILITY_RULE_VERSION,
+            "target_definition": (
+                "market_sector_blended_abnormal_return"
+                if sector_proxy_by_ticker.get(ticker)
+                else "beta_adjusted_market_abnormal_return"
+            ),
             **features,
         }
 
@@ -239,11 +252,14 @@ def build_news_return_dataset(
         "ticker",
         "signal_session",
         "signal_close_at",
+        "as_of_timestamp",
         "first_seen_at_min",
         "first_seen_at_max",
+        "data_vintage",
         "document",
         "horizon_days",
         "availability_rule_version",
+        "target_definition",
         *NUMERIC_FEATURES,
         "horizon_end",
         "label_available_at",
@@ -312,6 +328,17 @@ def compare_walk_forward_models(
 ) -> dict:
     """Compare the linear baseline and tree challenger on identical OOS rows."""
 
+    feature_audit = audit_feature_availability(dataset)
+    if feature_audit["status"] != "ok":
+        return {
+            "status": "feature_availability_audit_failed",
+            "feature_availability_audit": feature_audit,
+            "prediction_availability_audit": {},
+            "models": {},
+            "common_predictions": {},
+            "comparison": pd.DataFrame(),
+        }
+
     results = {
         "logistic": walk_forward_baseline(
             dataset,
@@ -332,6 +359,8 @@ def compare_walk_forward_models(
     if len(successful) != len(results):
         return {
             "status": "model_run_incomplete",
+            "feature_availability_audit": feature_audit,
+            "prediction_availability_audit": {},
             "models": results,
             "common_predictions": {},
             "comparison": pd.DataFrame(),
@@ -348,6 +377,8 @@ def compare_walk_forward_models(
     if not common_keys:
         return {
             "status": "no_common_oos_predictions",
+            "feature_availability_audit": feature_audit,
+            "prediction_availability_audit": {},
             "models": results,
             "common_predictions": {},
             "comparison": pd.DataFrame(),
@@ -359,6 +390,7 @@ def compare_walk_forward_models(
         predictions = result["predictions"].copy()
         keys = list(predictions[key_columns].itertuples(index=False, name=None))
         predictions = predictions.loc[[key in common_keys for key in keys]].reset_index(drop=True)
+        predictions["model_name"] = name
         common_predictions[name] = predictions
         metrics = _prediction_metrics(predictions)
         comparison_rows.append(
@@ -368,8 +400,20 @@ def compare_walk_forward_models(
                 **metrics,
             }
         )
+    prediction_audit = audit_prediction_availability(common_predictions)
+    if prediction_audit["status"] != "ok":
+        return {
+            "status": "prediction_availability_audit_failed",
+            "feature_availability_audit": feature_audit,
+            "prediction_availability_audit": prediction_audit,
+            "models": results,
+            "common_predictions": common_predictions,
+            "comparison": pd.DataFrame(comparison_rows),
+        }
     return {
         "status": "ok",
+        "feature_availability_audit": feature_audit,
+        "prediction_availability_audit": prediction_audit,
         "models": results,
         "common_predictions": common_predictions,
         "comparison": pd.DataFrame(comparison_rows),
@@ -385,6 +429,13 @@ def _walk_forward_model(
     min_train_sessions: int,
     random_state: int,
 ) -> dict:
+    feature_audit = audit_feature_availability(dataset)
+    if feature_audit["status"] != "ok":
+        result = _empty_walk_forward(
+            "feature_availability_audit_failed", model_version=model_version
+        )
+        result["feature_availability_audit"] = feature_audit
+        return result
     required = {
         "signal_session",
         "label_available_at",
@@ -435,10 +486,17 @@ def _walk_forward_model(
                 {
                     "ticker": source["ticker"],
                     "signal_session": source["signal_session"],
+                    "signal_close_at": source["signal_close_at"],
+                    "as_of_timestamp": source["as_of_timestamp"],
+                    "first_seen_at_max": source["first_seen_at_max"],
+                    "data_vintage": source["data_vintage"],
+                    "availability_rule_version": source["availability_rule_version"],
+                    "target_definition": source["target_definition"],
                     "target_positive": int(source["target_positive"]),
                     "target_raw_return": source.get("target_raw_return"),
                     "target_abnormal_return": float(source["target_abnormal_return"]),
                     "horizon_end": source.get("horizon_end"),
+                    "horizon_days": source.get("horizon_days"),
                     "label_available_at": source["label_available_at"],
                     "predicted_probability": float(probability),
                     "predicted_positive": int(probability >= 0.5),
@@ -446,6 +504,8 @@ def _walk_forward_model(
                     "historical_rate_prediction": int(train_positive_rate >= 0.5),
                     "train_rows": int(len(train)),
                     "train_sessions": int(train["signal_session"].nunique()),
+                    "train_session_start": train["signal_session"].min(),
+                    "train_session_end": train["signal_session"].max(),
                     "train_label_cutoff": train_cutoff,
                     "test_close_at": test_close,
                     "model_version": model_version,
@@ -465,6 +525,7 @@ def _walk_forward_model(
         "model_version": model_version,
         "predictions": result,
         "metrics": metrics,
+        "feature_availability_audit": feature_audit,
         "skipped_sessions": skipped_sessions,
     }
 
@@ -603,3 +664,38 @@ def _clean_prices(series: pd.Series | None) -> pd.Series:
     result.index = result.index.normalize()
     result = result.sort_index()
     return result[~result.index.duplicated(keep="last")]
+
+
+def _data_vintage(items: list[dict]) -> str:
+    """Hash the exact immutable headline versions used in one feature row."""
+
+    payload = []
+    for item in items:
+        payload.append(
+            {
+                "content_hash": str(item.get("content_hash") or ""),
+                "item_key": str(item.get("item_key") or ""),
+                "title": " ".join(str(item.get("title") or "").split()),
+                "first_seen_at": pd.Timestamp(item["first_seen_at"]).isoformat(),
+            }
+        )
+    payload = sorted(
+        payload,
+        key=lambda row: (
+            row["first_seen_at"],
+            row["content_hash"],
+            row["item_key"],
+            row["title"],
+        ),
+    )
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _item_sort_key(item: dict) -> tuple:
+    return (
+        pd.Timestamp(item["first_seen_at"]).isoformat(),
+        str(item.get("content_hash") or ""),
+        str(item.get("item_key") or ""),
+        " ".join(str(item.get("title") or "").split()),
+    )
