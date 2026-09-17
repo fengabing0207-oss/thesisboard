@@ -13,6 +13,7 @@ from src.news_signal_lab import (
     walk_forward_baseline,
     walk_forward_tree_challenger,
 )
+from src.news_signal_validation import audit_feature_availability
 
 
 def test_availability_session_uses_first_seen_and_regular_close():
@@ -64,6 +65,8 @@ def test_dataset_uses_first_seen_not_vendor_timestamp_and_builds_forward_label()
     assert len(dataset) == 1
     row = dataset.iloc[0]
     assert row["signal_session"] == signal_day
+    assert row["as_of_timestamp"] == session_close_utc(signal_day)
+    assert len(row["data_vintage"]) == 64
     assert row["horizon_end"] == sessions[41]
     assert row["label_available_at"] == session_close_utc(sessions[41])
     assert row["beta_estimation_end"] == signal_day.isoformat()
@@ -140,15 +143,60 @@ def test_dataset_uses_latest_article_version_within_a_session():
     assert dataset.iloc[0]["document"] == "Corrected headline"
 
 
+def test_dataset_vintage_and_document_are_stable_across_input_order():
+    sessions, ticker, benchmark = _price_fixture()
+    signal_day = sessions[40]
+    close = session_close_utc(signal_day)
+    news = [
+        {
+            "ticker": "NVDA",
+            "item_key": "wire:2",
+            "title": "Second captured headline",
+            "first_seen_at": close - pd.Timedelta(minutes=10),
+        },
+        {
+            "ticker": "NVDA",
+            "item_key": "wire:1",
+            "title": "First captured headline",
+            "first_seen_at": close - pd.Timedelta(minutes=20),
+        },
+    ]
+
+    first = build_news_return_dataset(
+        news,
+        prices_by_ticker={"NVDA": ticker},
+        benchmark_prices=benchmark,
+        horizon_days=1,
+    ).iloc[0]
+    second = build_news_return_dataset(
+        list(reversed(news)),
+        prices_by_ticker={"NVDA": ticker},
+        benchmark_prices=benchmark,
+        horizon_days=1,
+    ).iloc[0]
+
+    assert first["data_vintage"] == second["data_vintage"]
+    assert first["document"] == second["document"]
+
+
 def _walk_forward_frame() -> pd.DataFrame:
-    sessions = pd.bdate_range("2026-01-02", periods=22)
+    sessions = pd.bdate_range("2026-01-02", periods=23)
     rows = []
-    for index, session in enumerate(sessions):
+    for index, session in enumerate(sessions[:-1]):
         positive = index % 2
+        signal_close = session_close_utc(session)
         row = {
             "ticker": "NVDA" if index % 3 else "AAPL",
             "signal_session": session,
-            "label_available_at": session_close_utc(sessions[min(index + 1, len(sessions) - 1)]),
+            "signal_close_at": signal_close,
+            "as_of_timestamp": signal_close,
+            "first_seen_at_max": signal_close - pd.Timedelta(minutes=1),
+            "data_vintage": f"vintage-{index}",
+            "availability_rule_version": "observed-to-regular-close.v1",
+            "target_definition": "beta_adjusted_market_abnormal_return",
+            "horizon_days": 1,
+            "horizon_end": sessions[index + 1],
+            "label_available_at": session_close_utc(sessions[index + 1]),
             "document": "profit growth strong" if positive else "loss warning weak",
             "target_positive": positive,
             "target_abnormal_return": 0.02 if positive else -0.02,
@@ -172,6 +220,7 @@ def test_walk_forward_fits_only_on_labels_available_before_test_close():
     predictions = result["predictions"]
     assert not predictions.empty
     assert (predictions["train_label_cutoff"] < predictions["test_close_at"]).all()
+    assert (predictions["first_seen_at_max"] < predictions["as_of_timestamp"]).all()
     assert result["metrics"]["directional_accuracy"] >= result["metrics"]["historical_rate_accuracy"]
 
 
@@ -217,3 +266,16 @@ def test_model_comparison_uses_identical_oos_rows():
     )
     assert logistic_keys == tree_keys
     assert set(result["comparison"]["model"]) == {"logistic", "random_forest"}
+    assert result["feature_availability_audit"]["status"] == "ok"
+    assert result["prediction_availability_audit"]["status"] == "ok"
+
+
+def test_feature_availability_audit_rejects_post_as_of_observation():
+    frame = _walk_forward_frame()
+    frame.loc[0, "first_seen_at_max"] = frame.loc[0, "as_of_timestamp"]
+
+    audit = audit_feature_availability(frame)
+
+    assert audit["status"] == "failed"
+    check = audit["checks"].set_index("check")
+    assert check.loc["feature_observed_at_or_after_as_of", "violation_count"] == 1

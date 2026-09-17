@@ -32,6 +32,14 @@ Headlines are grouped by ticker and eligible signal session. The baseline uses:
 
 VADER is a generic lexical baseline, not a finance-specialized language model. Its purpose is to establish an interpretable floor that a more complex model must beat.
 
+Each ticker/session feature row also records:
+
+- `as_of_timestamp`: the eligible regular-market close for that snapshot;
+- `data_vintage`: a deterministic SHA-256 hash of the exact immutable headline versions used in the row;
+- `first_seen_at_max`: the latest availability timestamp among those versions.
+
+Before modeling, the feature audit requires every included headline to precede the as-of close, the as-of timestamp to equal the declared signal close, every usable label to mature strictly later, and every row to have a non-empty vintage hash. The hash identifies inputs; it is not a claim that yfinance itself supplies institutional point-in-time versioning.
+
 ## Targets
 
 The initial supported horizons are one and three benchmark sessions. Labels use split/dividend-adjusted closes and ThesisBoard's existing abnormal-return engine. A ticker must have an exact adjusted close on both the signal session and horizon end; the lab does not silently shift a label across a missing session. Rolling beta is estimated only from returns before the signal session. The engine accepts ticker-specific sector proxies, while the first UI slice currently runs the SPY beta-adjusted target without a sector mapping. Rows with missing prices or beta fallback are retained for audit but excluded from the strict modeling sample.
@@ -48,6 +56,14 @@ For each test session:
 - both outcome classes must exist in training.
 
 The lab reports out-of-sample probability diagnostics such as directional accuracy, a training-history positive-rate baseline, Brier score, log loss, ROC AUC when defined, and Spearman information coefficient when defined. The baseline probability is recomputed from each expanding training window; it is not inferred from the future test distribution. Full-window diagnostics are descriptive and do not choose the event policy.
+
+An explicit prediction audit then checks that both model families use identical ticker/session keys, each feature snapshot predates its test close, every recorded training-label cutoff is strictly earlier than that close, and the target label matures strictly afterward. Missing audit metadata or any violation stops policy selection. The final chronology is therefore expanding point-in-time training, an earlier purged validation window, and a later untouched test window—not a random train/test split.
+
+## Locked Strategy Specification And Calculation Parity
+
+Every validation candidate is materialized as a versioned `StrategySpec` containing the model, probability threshold, universe, holding horizon, benchmark, entry and exit rules, rebalancing schedule, weighting rule, overlap handling, direction, gross-exposure cap, cash-return assumption, and one-way cost. The canonical JSON representation is hashed into a stable spec ID. Unsupported rule values are rejected because recording a parameter the engine ignores would create false reproducibility.
+
+The validation book and later held-out book both run through the same `StrategySpec` entry point and position-book engine. A parity audit requires the spec ID, backtest version, and calculation-contract version to match across both runs. This is research-versus-held-out calculation parity. It does not claim equivalence to order routing, broker fills, market impact, or a live production stack.
 
 ## Validation-Selected Strategy Policy
 

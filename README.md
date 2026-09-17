@@ -11,7 +11,7 @@ The application has seven pages:
 - **Home** — product scope and research constraints.
 - **Pre-Trade Check** — structured thesis capture, heuristic risk checks, and an append-only local journal.
 - **Market News** — a yfinance market snapshot, raw ticker headlines, and an optional Anthropic topic summary.
-- **News Signal Lab** — immutable first-seen headline capture, close-to-close targets, common-window linear/tree comparison, validation-only policy selection, and a locked turnover-aware position-book audit.
+- **News Signal Lab** — immutable first-seen headline capture, hashed point-in-time feature vintages, leakage-audited walk-forward evaluation, a locked rule-based `StrategySpec`, and a turnover-aware held-out position book.
 - **Validation Lab** — horizon-specific signal outcomes, abnormal returns, hit rates, and cohort base-rate comparisons.
 - **Methodology** — the reasoning behind the validation design.
 - **Roadmap** — planned evidence and automation layers.
@@ -56,8 +56,10 @@ The current methodological focus is validation before automation:
 - Market News depends on best-effort yfinance data and is not a complete point-in-time historical news archive.
 - News Signal Lab starts collecting availability history only when the user captures headlines; vendor timestamps are never treated as proof that an article was historically available to ThesisBoard.
 - News Signal Lab selects a model/threshold only on a purged validation segment, maximizing net return relative to exposure-matched SPY subject to signal-frequency and average-daily-turnover limits, then reports a later held-out audit. Re-running after viewing the test makes it exploratory.
+- Every modeled feature row records an `as_of_timestamp` and deterministic `data_vintage`; policy selection fails closed if feature times, training-label cutoffs, target-label times, or common OOS keys violate the point-in-time contract.
+- The selected model, threshold, universe, holding horizon, benchmark, entry/exit rules, weighting, overlap handling, rebalancing schedule, exposure cap, cash assumption, and cost are hashed into one immutable `StrategySpec`. Validation and held-out books must report the same spec and calculation-engine versions.
 - The position-book audit starts flat on the held-out segment, equal-weights active tickers, collapses overlapping same-ticker signals, and charges one-way cost on realized weight turnover.
-- Its adjusted-close execution, zero-return cash, small held-out sample, and best-effort data are research assumptions—not executable performance or an alpha claim.
+- Calculation parity means the two research windows use identical code and rules. It does not establish parity with broker fills or live production. Adjusted-close execution, zero-return cash, small held-out samples, and best-effort data remain research assumptions—not executable performance or an alpha claim.
 - The first News Signal Lab UI uses a SPY beta-adjusted target; ticker-specific sector-proxy mappings remain an engine-level option.
 - The optional Anthropic output summarizes only the displayed headlines and can be unavailable when no local API key is configured.
 - The app does not deploy a forecasting model or generate live trade instructions.

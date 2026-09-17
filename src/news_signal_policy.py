@@ -10,8 +10,11 @@ from collections.abc import Iterable, Mapping
 
 import pandas as pd
 
+from .news_signal_validation import audit_prediction_availability
+
 
 POLICY_VERSION = "long-event-threshold.v1"
+SPLIT_VERSION = "expanding-train-purged-validation-test.v1"
 KEY_COLUMNS = ["ticker", "signal_session"]
 
 
@@ -85,6 +88,12 @@ def select_and_evaluate_holdout_policy(
     if int(min_validation_sessions) < 1 or int(min_test_sessions) < 1:
         raise ValueError("minimum session counts must be positive")
 
+    availability_audit = audit_prediction_availability(model_predictions)
+    if availability_audit["status"] != "ok":
+        result = _empty_policy("prediction_availability_audit_failed")
+        result["availability_audit"] = availability_audit
+        return result
+
     threshold_grid = sorted({float(value) for value in thresholds})
     if not threshold_grid or any(value < 0.0 or value > 1.0 for value in threshold_grid):
         raise ValueError("thresholds must contain values between 0 and 1")
@@ -113,7 +122,9 @@ def select_and_evaluate_holdout_policy(
         normalized[str(name)] = frame
 
     if not common_keys:
-        return _empty_policy("no_common_oos_predictions")
+        result = _empty_policy("no_common_oos_predictions")
+        result["availability_audit"] = availability_audit
+        return result
     for name, frame in normalized.items():
         keys = list(frame[KEY_COLUMNS].itertuples(index=False, name=None))
         normalized[name] = frame.loc[[key in common_keys for key in keys]].sort_values(
@@ -126,6 +137,7 @@ def select_and_evaluate_holdout_policy(
     if split_index < int(min_validation_sessions) or len(sessions) - split_index < int(min_test_sessions):
         result = _empty_policy("insufficient_holdout_sessions")
         result["common_session_count"] = int(len(sessions))
+        result["availability_audit"] = availability_audit
         return result
 
     validation_sessions = set(sessions[:split_index])
@@ -133,6 +145,16 @@ def select_and_evaluate_holdout_policy(
     first_test_session = pd.Timestamp(sessions[split_index])
     first_test_rows = reference.loc[reference["signal_session"] == first_test_session]
     first_test_close = first_test_rows["test_close_at"].min()
+    validation_reference = reference.loc[
+        reference["signal_session"].isin(validation_sessions)
+        & (reference["label_available_at"] < first_test_close)
+    ]
+    test_reference = reference.loc[reference["signal_session"].isin(test_sessions)]
+    chronological_windows = _chronological_windows(
+        reference,
+        validation_reference=validation_reference,
+        test_reference=test_reference,
+    )
 
     candidates: list[dict] = []
     frames: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
@@ -169,6 +191,8 @@ def select_and_evaluate_holdout_policy(
         result = _empty_policy("no_eligible_validation_policy")
         result.update(
             {
+                "availability_audit": availability_audit,
+                "chronological_windows": chronological_windows,
                 "candidates": candidate_table,
                 "validation_session_count": int(len(validation_sessions)),
                 "test_session_count": int(len(test_sessions)),
@@ -195,6 +219,9 @@ def select_and_evaluate_holdout_policy(
     return {
         "status": "ok",
         "policy_version": POLICY_VERSION,
+        "split_version": SPLIT_VERSION,
+        "availability_audit": availability_audit,
+        "chronological_windows": chronological_windows,
         "chosen_model": chosen_model,
         "probability_threshold": threshold,
         "round_trip_cost_bps": float(round_trip_cost_bps),
@@ -222,5 +249,47 @@ def _empty_policy(status: str) -> dict:
     return {
         "status": status,
         "policy_version": POLICY_VERSION,
+        "split_version": SPLIT_VERSION,
         "candidates": pd.DataFrame(),
+    }
+
+
+def _chronological_windows(
+    reference: pd.DataFrame,
+    *,
+    validation_reference: pd.DataFrame,
+    test_reference: pd.DataFrame,
+) -> dict:
+    training = {
+        "mode": "expanding_point_in_time",
+        "first_training_session": None,
+        "last_training_session": None,
+        "last_training_label_cutoff": None,
+    }
+    if "train_session_start" in reference.columns:
+        training["first_training_session"] = reference["train_session_start"].min()
+    if "train_session_end" in reference.columns:
+        training["last_training_session"] = reference["train_session_end"].max()
+    if "train_label_cutoff" in reference.columns:
+        training["last_training_label_cutoff"] = reference["train_label_cutoff"].max()
+    return {
+        "training": training,
+        "validation": _window_summary(validation_reference),
+        "test": _window_summary(test_reference),
+    }
+
+
+def _window_summary(frame: pd.DataFrame) -> dict:
+    if frame.empty:
+        return {
+            "start_session": None,
+            "end_session": None,
+            "session_count": 0,
+            "row_count": 0,
+        }
+    return {
+        "start_session": frame["signal_session"].min(),
+        "end_session": frame["signal_session"].max(),
+        "session_count": int(frame["signal_session"].nunique()),
+        "row_count": int(len(frame)),
     }

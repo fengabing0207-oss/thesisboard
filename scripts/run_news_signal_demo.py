@@ -76,6 +76,10 @@ def main() -> None:
         f"threshold={policy['probability_threshold']:.2f}"
     )
     print(
+        f"strategy spec={policy['strategy_spec_id']} "
+        f"calculation parity={policy['calculation_parity_audit']['status']}"
+    )
+    print(
         f"held-out selected events={policy['test_event']['selected_count']} "
         f"mean net event return={policy['test_event']['mean_net_abnormal_return']}"
     )

@@ -6,22 +6,35 @@ from src.news_signal_policy import evaluate_event_policy, select_and_evaluate_ho
 
 
 def _policy_predictions() -> dict[str, pd.DataFrame]:
-    sessions = pd.bdate_range("2026-01-02", periods=20)
+    sessions = pd.bdate_range("2026-01-02", periods=21)
     frames = {}
     for model in ["logistic", "random_forest"]:
         rows = []
-        for index, session in enumerate(sessions):
+        for index, session in enumerate(sessions[:-1]):
             positive = index % 2 == 1
             probability = (0.80 if positive else 0.20) if model == "logistic" else (
                 0.20 if positive else 0.80
             )
-            label_session = sessions[min(index + 1, len(sessions) - 1)]
+            label_session = sessions[index + 1]
+            test_close = session_close_utc(session)
             rows.append(
                 {
                     "ticker": "DEMO",
                     "signal_session": session,
+                    "signal_close_at": test_close,
+                    "as_of_timestamp": test_close,
+                    "first_seen_at_max": test_close - pd.Timedelta(minutes=1),
+                    "data_vintage": f"vintage-{index}",
+                    "availability_rule_version": "observed-to-regular-close.v1",
+                    "target_definition": "beta_adjusted_market_abnormal_return",
+                    "model_name": model,
+                    "model_version": f"{model}.v1",
+                    "horizon_end": label_session,
                     "label_available_at": session_close_utc(label_session),
-                    "test_close_at": session_close_utc(session),
+                    "train_session_start": sessions[0] - pd.Timedelta(days=1),
+                    "train_session_end": session - pd.Timedelta(days=1),
+                    "train_label_cutoff": test_close - pd.Timedelta(days=1),
+                    "test_close_at": test_close,
                     "predicted_probability": probability,
                     "target_abnormal_return": 0.02 if positive else -0.02,
                 }
@@ -67,6 +80,10 @@ def test_holdout_policy_purges_boundary_label_and_never_selects_on_test():
     assert result["probability_threshold"] == 0.7
     assert result["purged_validation_rows"] == 1
     assert result["validation"]["mean_net_abnormal_return"] == pytest.approx(0.019)
+    assert result["availability_audit"]["status"] == "ok"
+    assert result["chronological_windows"]["validation"]["end_session"] < result[
+        "chronological_windows"
+    ]["test"]["start_session"]
 
     changed = {name: frame.copy() for name, frame in predictions.items()}
     test_sessions = sorted(changed["logistic"]["signal_session"].unique())[12:]
@@ -101,3 +118,29 @@ def test_holdout_policy_reports_when_frequency_constraint_has_no_candidate():
 
     assert result["status"] == "no_eligible_validation_policy"
     assert not result["candidates"].empty
+
+
+def test_holdout_policy_fails_closed_when_train_cutoff_leaks():
+    predictions = _policy_predictions()
+    predictions["logistic"].loc[0, "train_label_cutoff"] = predictions["logistic"].loc[
+        0, "test_close_at"
+    ]
+
+    result = select_and_evaluate_holdout_policy(predictions)
+
+    assert result["status"] == "prediction_availability_audit_failed"
+    assert result["availability_audit"]["status"] == "failed"
+
+
+def test_holdout_policy_fails_closed_when_models_use_different_targets():
+    predictions = _policy_predictions()
+    predictions["random_forest"].loc[0, "target_abnormal_return"] = 0.99
+
+    result = select_and_evaluate_holdout_policy(predictions)
+
+    assert result["status"] == "prediction_availability_audit_failed"
+    checks = result["availability_audit"]["checks"]
+    mismatch = checks.loc[
+        checks["check"] == "common_oos_data_contract", "violation_count"
+    ].sum()
+    assert mismatch == 1
