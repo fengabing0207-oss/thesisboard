@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import date
+from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -7,6 +10,8 @@ import streamlit as st
 from src import market_news
 from src.demo_validation_data import EXPLICIT_OUTCOME_FIELDS, prepare_validation_lab_data
 from src.journal import append_record, load_records
+from src.news_signal_lab import build_news_return_dataset, walk_forward_baseline
+from src.news_store import ingest_news_items, list_news_items, news_store_summary
 from src.pre_trade_check import (
     EventType,
     InstrumentType,
@@ -15,6 +20,11 @@ from src.pre_trade_check import (
     ThesisDecision,
     evaluate_pre_trade_risk,
 )
+from src.price_provider import CachingPriceProvider, YFinancePriceProvider
+
+
+ROOT = Path(__file__).resolve().parent
+NEWS_PRICE_CACHE = ROOT / "data" / "price_cache"
 
 
 SNAPSHOT_COLUMNS = [
@@ -70,7 +80,15 @@ def main() -> None:
 
     page = st.sidebar.radio(
         "Pages",
-        ["Home", "Pre-Trade Check", "Market News", "Validation Lab", "Methodology", "Roadmap"],
+        [
+            "Home",
+            "Pre-Trade Check",
+            "Market News",
+            "News Signal Lab",
+            "Validation Lab",
+            "Methodology",
+            "Roadmap",
+        ],
     )
 
     if page == "Home":
@@ -79,6 +97,8 @@ def main() -> None:
         render_pre_trade_check()
     elif page == "Market News":
         render_market_news()
+    elif page == "News Signal Lab":
+        render_news_signal_lab()
     elif page == "Validation Lab":
         render_validation_lab()
     elif page == "Methodology":
@@ -264,6 +284,7 @@ def render_market_news() -> None:
 
     _render_market_news_snapshot(ticker)
     normalized = _render_market_news_headlines(ticker)
+    _render_market_news_capture(ticker, normalized)
     _render_market_news_ai_summary(normalized)
 
 
@@ -368,6 +389,143 @@ def _render_market_news_ai_summary(normalized_news: list) -> None:
         st.info("AI topic summary unavailable: could not reach the local Anthropic API.")
         return
     st.write(summary)
+
+
+def _render_market_news_capture(ticker: str, normalized_news: list) -> None:
+    st.subheader("Research capture")
+    st.caption(
+        "Save the headlines exactly as ThesisBoard sees them now. The first-seen timestamp, "
+        "not the vendor publication time, controls future point-in-time research."
+    )
+    if not ticker or not normalized_news:
+        st.info("Research capture unavailable until a ticker has headlines.")
+        return
+    if st.button("Capture current headlines", key="capture_market_news"):
+        result = ingest_news_items(ticker=ticker, items=normalized_news, provider="yfinance")
+        st.success(
+            f"Captured {result['inserted']} new headline versions; "
+            f"{result['existing']} were already stored and {result['skipped']} were skipped."
+        )
+
+
+def render_news_signal_lab() -> None:
+    st.header("News Signal Lab")
+    st.caption(
+        "Point-in-time headline research with close-to-close labels and chronological evaluation — "
+        "not a trading recommendation."
+    )
+    st.warning(
+        "The lab never backfills availability from a vendor publication timestamp. A headline becomes "
+        "eligible only when ThesisBoard first captured it, so a new installation needs time to build history."
+    )
+
+    summary = news_store_summary()
+    metrics = st.columns(3)
+    metrics[0].metric("Captured headline versions", int(summary["item_count"] or 0))
+    metrics[1].metric("Tickers", int(summary["ticker_count"] or 0))
+    coverage = "n/a"
+    if summary.get("first_seen_at") and summary.get("last_seen_at"):
+        first = pd.Timestamp(summary["first_seen_at"]).date()
+        last = pd.Timestamp(summary["last_seen_at"]).date()
+        coverage = f"{first} → {last}"
+    metrics[2].metric("Observed coverage", coverage)
+
+    items = list_news_items()
+    if not items:
+        st.info("No captured headlines yet. Use Market News → Capture current headlines to start the dataset.")
+        return
+
+    latest = pd.DataFrame(items[:100])
+    st.subheader("Latest immutable captures")
+    st.dataframe(
+        latest[["first_seen_at", "ticker", "title", "publisher", "published_at", "provider"]],
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.subheader("Chronological baseline")
+    st.caption(
+        "TF-IDF text features and VADER headline features feed a logistic baseline. For each test session, "
+        "training uses only targets that were already observable before that session's close."
+    )
+    config = st.columns(2)
+    horizon_days = config[0].selectbox("Forward horizon (sessions)", [1, 3], index=0)
+    min_train_rows = int(
+        config[1].number_input("Minimum chronological training rows", min_value=10, value=30, step=5)
+    )
+    if not st.button("Run leakage-safe baseline", key="run_news_signal_baseline"):
+        st.caption("No model is trained automatically. Run the baseline only when you want a research snapshot.")
+        return
+
+    tickers = sorted({item["ticker"] for item in items})
+    first_seen = min(pd.Timestamp(item["first_seen_at"]) for item in items)
+    start = first_seen.tz_convert("UTC").tz_localize(None).normalize() - pd.Timedelta(days=240)
+    end = pd.Timestamp(date.today())
+    provider = CachingPriceProvider(
+        YFinancePriceProvider(),
+        NEWS_PRICE_CACHE,
+        snapshot_id=date.today().isoformat(),
+    )
+    try:
+        bundle = provider.get_history([*tickers, "SPY"], start, end)
+    except Exception as exc:
+        st.error(f"Could not build the research dataset from yfinance: {exc}")
+        return
+    benchmark = bundle.prices.get("SPY")
+    if benchmark is None or benchmark.empty:
+        st.error("SPY benchmark history is unavailable; the lab will not fall back to raw returns.")
+        return
+
+    dataset = build_news_return_dataset(
+        items,
+        prices_by_ticker={ticker: bundle.prices[ticker] for ticker in tickers if ticker in bundle.prices},
+        benchmark_prices=benchmark,
+        horizon_days=int(horizon_days),
+    )
+    st.subheader("Dataset audit")
+    quality = (
+        dataset["data_quality_flag"].value_counts(dropna=False).rename_axis("status").reset_index(name="rows")
+        if not dataset.empty
+        else pd.DataFrame(columns=["status", "rows"])
+    )
+    st.dataframe(quality, width="stretch", hide_index=True)
+    if bundle.missing_symbols:
+        st.warning("Missing price histories: " + ", ".join(bundle.missing_symbols))
+
+    result = walk_forward_baseline(dataset, min_train_rows=min_train_rows)
+    if result["status"] != "ok":
+        st.info(
+            "No defensible out-of-sample estimate yet: "
+            f"{result['status'].replace('_', ' ')}. Keep collecting headlines and let their horizons mature."
+        )
+        return
+
+    st.subheader("Out-of-sample research metrics")
+    values = result["metrics"]
+    row = st.columns(4)
+    row[0].metric("OOS rows", values["prediction_count"])
+    row[1].metric("Directional accuracy", _fmt_rate(values["directional_accuracy"]))
+    row[2].metric("Historical-rate baseline", _fmt_rate(values["historical_rate_accuracy"]))
+    row[3].metric("Brier score", f"{values['brier_score']:.4f}")
+    st.caption(
+        f"Model: {result['model_version']}. These are research diagnostics, not evidence of profitable alpha. "
+        "No threshold or strategy was optimized in this run."
+    )
+    predictions = result["predictions"].copy()
+    st.dataframe(
+        predictions[
+            [
+                "signal_session",
+                "ticker",
+                "predicted_probability",
+                "target_abnormal_return",
+                "train_rows",
+                "train_label_cutoff",
+            ]
+        ],
+        width="stretch",
+        hide_index=True,
+    )
 
 
 def render_validation_lab() -> None:
@@ -499,7 +657,7 @@ def render_roadmap() -> None:
     roadmap = pd.DataFrame(
         [
             {"version": "V1", "focus": "validation spine"},
-            {"version": "V1.5", "focus": "price/news evidence layer"},
+            {"version": "V1.5", "focus": "point-in-time news evidence and chronological baseline"},
             {"version": "V2", "focus": "agentic theme classification and semantic expansion"},
             {"version": "V3", "focus": "production-grade data providers and portfolio risk"},
         ]

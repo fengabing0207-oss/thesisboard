@@ -7,6 +7,7 @@ def test_app_module_imports_with_pre_trade_page():
     import app
 
     assert hasattr(app, "render_pre_trade_check")
+    assert hasattr(app, "render_news_signal_lab")
     assert hasattr(app, "main")
 
 

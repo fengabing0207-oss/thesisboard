@@ -1,0 +1,180 @@
+import numpy as np
+import pandas as pd
+
+from src.news_signal_lab import (
+    MODEL_VERSION,
+    NUMERIC_FEATURES,
+    availability_session,
+    build_news_return_dataset,
+    extract_headline_features,
+    session_close_utc,
+    walk_forward_baseline,
+)
+
+
+def test_availability_session_uses_first_seen_and_regular_close():
+    sessions = pd.to_datetime(["2026-09-17", "2026-09-18", "2026-09-21"])
+
+    assert availability_session("2026-09-18T15:59:00-04:00", sessions) == pd.Timestamp("2026-09-18")
+    assert availability_session("2026-09-18T16:00:00-04:00", sessions) == pd.Timestamp("2026-09-21")
+    assert availability_session("2026-09-19T10:00:00-04:00", sessions) == pd.Timestamp("2026-09-21")
+
+
+def test_headline_features_separate_positive_and_negative_language():
+    positive = extract_headline_features(["Company reports strong profit growth and record demand"])
+    negative = extract_headline_features(["Company warns of fraud losses and bankruptcy risk"])
+
+    assert positive["vader_compound_mean"] > negative["vader_compound_mean"]
+    assert positive["news_count"] == 1
+    assert negative["vader_negative_share"] == 1.0
+
+
+def _price_fixture():
+    sessions = pd.bdate_range("2026-01-02", periods=55)
+    pattern = np.array([0.004, -0.002, 0.003, 0.001, -0.001] * 11)
+    benchmark = pd.Series(100 * np.cumprod(1 + pattern), index=sessions)
+    ticker_returns = 1.2 * pattern + np.array([0.0005, -0.0003, 0.0002, 0.0001, -0.0002] * 11)
+    ticker = pd.Series(80 * np.cumprod(1 + ticker_returns), index=sessions)
+    ticker.iloc[41:] = ticker.iloc[41:] * 1.05
+    return sessions, ticker, benchmark
+
+
+def test_dataset_uses_first_seen_not_vendor_timestamp_and_builds_forward_label():
+    sessions, ticker, benchmark = _price_fixture()
+    signal_day = sessions[40]
+    news = [
+        {
+            "ticker": "NVDA",
+            "title": "Demand expands",
+            "published_at": "2025-01-01T12:00:00Z",
+            "first_seen_at": session_close_utc(signal_day) - pd.Timedelta(minutes=1),
+        }
+    ]
+
+    dataset = build_news_return_dataset(
+        news,
+        prices_by_ticker={"NVDA": ticker},
+        benchmark_prices=benchmark,
+        horizon_days=1,
+    )
+
+    assert len(dataset) == 1
+    row = dataset.iloc[0]
+    assert row["signal_session"] == signal_day
+    assert row["horizon_end"] == sessions[41]
+    assert row["label_available_at"] == session_close_utc(sessions[41])
+    assert row["beta_estimation_end"] == signal_day.isoformat()
+    assert row["data_quality_flag"] == "ok"
+    assert bool(row["usable_for_model"]) is True
+    assert row["target_abnormal_return"] > 0
+
+
+def test_dataset_moves_after_close_capture_to_next_session():
+    sessions, ticker, benchmark = _price_fixture()
+    observed_day = sessions[39]
+    news = [
+        {
+            "ticker": "NVDA",
+            "title": "After-close update",
+            "first_seen_at": session_close_utc(observed_day),
+        }
+    ]
+    dataset = build_news_return_dataset(
+        news,
+        prices_by_ticker={"NVDA": ticker},
+        benchmark_prices=benchmark,
+        horizon_days=1,
+    )
+    assert dataset.iloc[0]["signal_session"] == sessions[40]
+
+
+def test_dataset_refuses_shifted_label_when_ticker_session_is_missing():
+    sessions, ticker, benchmark = _price_fixture()
+    signal_day = sessions[40]
+    news = [
+        {
+            "ticker": "NVDA",
+            "title": "Demand expands",
+            "first_seen_at": session_close_utc(signal_day) - pd.Timedelta(minutes=1),
+        }
+    ]
+    ticker = ticker.drop(sessions[41])
+    dataset = build_news_return_dataset(
+        news,
+        prices_by_ticker={"NVDA": ticker},
+        benchmark_prices=benchmark,
+        horizon_days=1,
+    )
+    assert dataset.iloc[0]["data_quality_flag"] == "missing_ticker_session_price"
+    assert bool(dataset.iloc[0]["usable_for_model"]) is False
+
+
+def test_dataset_uses_latest_article_version_within_a_session():
+    sessions, ticker, benchmark = _price_fixture()
+    signal_day = sessions[40]
+    close = session_close_utc(signal_day)
+    news = [
+        {
+            "ticker": "NVDA",
+            "item_key": "wire:id:123",
+            "title": "Initial headline",
+            "first_seen_at": close - pd.Timedelta(minutes=30),
+        },
+        {
+            "ticker": "NVDA",
+            "item_key": "wire:id:123",
+            "title": "Corrected headline",
+            "first_seen_at": close - pd.Timedelta(minutes=15),
+        },
+    ]
+    dataset = build_news_return_dataset(
+        news,
+        prices_by_ticker={"NVDA": ticker},
+        benchmark_prices=benchmark,
+        horizon_days=1,
+    )
+    assert dataset.iloc[0]["news_count"] == 1
+    assert dataset.iloc[0]["document"] == "Corrected headline"
+
+
+def _walk_forward_frame() -> pd.DataFrame:
+    sessions = pd.bdate_range("2026-01-02", periods=22)
+    rows = []
+    for index, session in enumerate(sessions):
+        positive = index % 2
+        row = {
+            "ticker": "NVDA" if index % 3 else "AAPL",
+            "signal_session": session,
+            "label_available_at": session_close_utc(sessions[min(index + 1, len(sessions) - 1)]),
+            "document": "profit growth strong" if positive else "loss warning weak",
+            "target_positive": positive,
+            "target_abnormal_return": 0.02 if positive else -0.02,
+            "usable_for_model": True,
+        }
+        row.update({name: 0.0 for name in NUMERIC_FEATURES})
+        row["news_count"] = 1
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def test_walk_forward_fits_only_on_labels_available_before_test_close():
+    result = walk_forward_baseline(
+        _walk_forward_frame(),
+        min_train_rows=6,
+        min_train_sessions=6,
+    )
+
+    assert result["status"] == "ok"
+    assert result["model_version"] == MODEL_VERSION
+    predictions = result["predictions"]
+    assert not predictions.empty
+    assert (predictions["train_label_cutoff"] < predictions["test_close_at"]).all()
+    assert result["metrics"]["directional_accuracy"] >= result["metrics"]["historical_rate_accuracy"]
+
+
+def test_walk_forward_refuses_unusable_rows():
+    frame = _walk_forward_frame()
+    frame["usable_for_model"] = False
+    result = walk_forward_baseline(frame, min_train_rows=2, min_train_sessions=2)
+    assert result["status"] == "no_usable_matured_rows"
+    assert result["predictions"].empty
