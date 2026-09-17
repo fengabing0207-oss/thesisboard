@@ -11,7 +11,7 @@ The application has seven pages:
 - **Home** — product scope and research constraints.
 - **Pre-Trade Check** — structured thesis capture, heuristic risk checks, and an append-only local journal.
 - **Market News** — a yfinance market snapshot, raw ticker headlines, and an optional Anthropic topic summary.
-- **News Signal Lab** — immutable first-seen headline capture, hashed point-in-time feature vintages, leakage-audited walk-forward evaluation, a locked rule-based `StrategySpec`, and a turnover-aware held-out position book.
+- **News Signal Lab** — immutable first-seen headline capture, hashed point-in-time feature vintages, leakage-audited walk-forward evaluation, a locked rule-based `StrategySpec`, a turnover-aware held-out position book, and an append-only scheduled-research audit.
 - **Validation Lab** — horizon-specific signal outcomes, abnormal returns, hit rates, and cohort base-rate comparisons.
 - **Methodology** — the reasoning behind the validation design.
 - **Roadmap** — planned evidence and automation layers.
@@ -31,7 +31,19 @@ The optional headline summary requires an `ANTHROPIC_API_KEY` in the local envir
 
 For an offline check of the News Signal Lab pipeline, run `python scripts/run_news_signal_demo.py`. Its data and relationship are synthetic and demonstrate plumbing only, not predictive performance.
 
-Build a real point-in-time headline history by running, for example, `python scripts/collect_news.py NVDA AVGO MRVL MU VRT ORCL INTC`. Each batch writes an immutable collection-run audit record. Schedule that command externally if desired; the repository does not claim that a local process is always running.
+Build a real point-in-time headline history by running, for example, `python scripts/collect_news.py NVDA AVGO MRVL MU VRT ORCL INTC`. Each batch writes an immutable collection-run audit record.
+
+For a guarded collection-and-calibration cycle, run `python scripts/run_research_cycle.py`. The cycle re-evaluates matured history and may append a challenger `StrategySpec`, but it never promotes that candidate. Local SQLite is suitable for development only. Scheduled runners require `THESISBOARD_DATABASE_URL` to point to PostgreSQL and refuse to run otherwise.
+
+The repository includes a two-hourly GitHub Actions workflow, disabled by default. After the workflow reaches the default branch, configure the `THESISBOARD_DATABASE_URL` repository secret, set the `THESISBOARD_AUTOMATION_ENABLED` repository variable to `true`, and optionally set `THESISBOARD_WATCHLIST`. A reviewed candidate is approved separately, for example:
+
+```bash
+python scripts/promote_strategy.py 42 approved \
+  --decided-by "research-owner" \
+  --note "Reviewed validation and held-out diagnostics"
+```
+
+See [Automation Operations](docs/automation_operations.md) for enablement, failure behavior, and audit semantics.
 
 ## Deploy To Streamlit Community Cloud
 
@@ -55,6 +67,8 @@ The current methodological focus is validation before automation:
 - Validation Lab currently uses synthetic demo signals to demonstrate the workflow; it does not establish predictive power.
 - Market News depends on best-effort yfinance data and is not a complete point-in-time historical news archive.
 - News Signal Lab starts collecting availability history only when the user captures headlines; vendor timestamps are never treated as proof that an article was historically available to ThesisBoard.
+- Once explicitly enabled with durable PostgreSQL storage, the scheduled research loop automatically accumulates new `first_seen_at` observations. It cannot recreate observations from before enablement and it stops candidate generation whenever any requested ticker fails collection.
+- Scheduled calibration selects only on the validation window. Held-out metrics are logged as diagnostics, candidates are never auto-promoted, and every approval or rejection is a separate append-only event with a database-level one-decision constraint.
 - News Signal Lab selects a model/threshold only on a purged validation segment, maximizing net return relative to exposure-matched SPY subject to signal-frequency and average-daily-turnover limits, then reports a later held-out audit. Re-running after viewing the test makes it exploratory.
 - Every modeled feature row records an `as_of_timestamp` and deterministic `data_vintage`; policy selection fails closed if feature times, training-label cutoffs, target-label times, or common OOS keys violate the point-in-time contract.
 - The selected model, threshold, universe, holding horizon, benchmark, entry/exit rules, weighting, overlap handling, rebalancing schedule, exposure cap, cash assumption, and cost are hashed into one immutable `StrategySpec`. Validation and held-out books must report the same spec and calculation-engine versions.
