@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.news_signal_lab import build_news_return_dataset, session_close_utc, walk_forward_baseline
+from src.news_signal_lab import build_news_return_dataset, compare_walk_forward_models, session_close_utc
+from src.news_signal_policy import select_and_evaluate_holdout_policy
 
 
 def main() -> None:
@@ -44,18 +45,37 @@ def main() -> None:
         benchmark_prices=benchmark,
         horizon_days=1,
     )
-    result = walk_forward_baseline(dataset, min_train_rows=20, min_train_sessions=20)
+    result = compare_walk_forward_models(dataset, min_train_rows=20, min_train_sessions=20)
     if result["status"] != "ok":
-        raise RuntimeError(f"synthetic News Signal Lab demo failed: {result['status']}")
+        raise RuntimeError(f"synthetic News Signal Lab model comparison failed: {result['status']}")
+    policy = select_and_evaluate_holdout_policy(
+        result["common_predictions"],
+        min_validation_sessions=10,
+        min_test_sessions=5,
+        min_validation_signals=5,
+        max_validation_selection_rate=0.6,
+        round_trip_cost_bps=10,
+    )
+    if policy["status"] != "ok":
+        raise RuntimeError(f"synthetic News Signal Lab policy audit failed: {policy['status']}")
 
-    metrics = result["metrics"]
     print("ThesisBoard News Signal Lab synthetic demonstration")
     print("WARNING: generated data proves pipeline behavior only; it is not alpha evidence")
     print(f"dataset rows: {len(dataset)}")
-    print(f"out-of-sample rows: {metrics['prediction_count']}")
-    print(f"directional accuracy: {metrics['directional_accuracy']}")
-    print(f"historical-rate accuracy: {metrics['historical_rate_accuracy']}")
-    print(f"brier score: {metrics['brier_score']}")
+    for row in result["comparison"].to_dict("records"):
+        print(
+            f"{row['model']} OOS rows={row['prediction_count']} "
+            f"accuracy={row['directional_accuracy']:.3f} brier={row['brier_score']:.4f}"
+        )
+    print(
+        f"validation-selected policy: model={policy['chosen_model']} "
+        f"threshold={policy['probability_threshold']:.2f}"
+    )
+    print(
+        f"held-out selected events={policy['test']['selected_count']} "
+        f"mean net event return={policy['test']['mean_net_abnormal_return']}"
+    )
+    print("WARNING: event returns are not portfolio P&L or turnover")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,8 @@ import streamlit as st
 from src import market_news
 from src.demo_validation_data import EXPLICIT_OUTCOME_FIELDS, prepare_validation_lab_data
 from src.journal import append_record, load_records
-from src.news_signal_lab import build_news_return_dataset, walk_forward_baseline
+from src.news_signal_lab import build_news_return_dataset, compare_walk_forward_models
+from src.news_signal_policy import select_and_evaluate_holdout_policy
 from src.news_store import ingest_news_items, list_news_items, news_store_summary
 from src.pre_trade_check import (
     EventType,
@@ -443,18 +444,24 @@ def render_news_signal_lab() -> None:
         hide_index=True,
     )
 
-    st.subheader("Chronological baseline")
+    st.subheader("Chronological model comparison")
     st.caption(
-        "TF-IDF text features and VADER headline features feed a logistic baseline. For each test session, "
-        "training uses only targets that were already observable before that session's close."
+        "A logistic baseline and constrained random-forest challenger use the same TF-IDF/VADER features "
+        "and identical out-of-sample rows. Each refit sees only labels known before the test close."
     )
-    config = st.columns(2)
+    config = st.columns(4)
     horizon_days = config[0].selectbox("Forward horizon (sessions)", [1, 3], index=0)
     min_train_rows = int(
         config[1].number_input("Minimum chronological training rows", min_value=10, value=30, step=5)
     )
-    if not st.button("Run leakage-safe baseline", key="run_news_signal_baseline"):
-        st.caption("No model is trained automatically. Run the baseline only when you want a research snapshot.")
+    round_trip_cost_bps = float(
+        config[2].number_input("Assumed event cost (bps)", min_value=0, value=10, step=1)
+    )
+    max_selection_rate = float(
+        config[3].number_input("Max validation selection (%)", min_value=5, max_value=100, value=50, step=5)
+    ) / 100.0
+    if not st.button("Run locked evaluation", key="run_news_signal_evaluation"):
+        st.caption("No model is trained automatically. Run only when you want a dated research snapshot.")
         return
 
     tickers = sorted({item["ticker"] for item in items})
@@ -492,40 +499,77 @@ def render_news_signal_lab() -> None:
     if bundle.missing_symbols:
         st.warning("Missing price histories: " + ", ".join(bundle.missing_symbols))
 
-    result = walk_forward_baseline(dataset, min_train_rows=min_train_rows)
-    if result["status"] != "ok":
+    comparison = compare_walk_forward_models(dataset, min_train_rows=min_train_rows)
+    if comparison["status"] != "ok":
+        model_statuses = ", ".join(
+            f"{name}: {result['status'].replace('_', ' ')}"
+            for name, result in comparison["models"].items()
+        )
         st.info(
-            "No defensible out-of-sample estimate yet: "
-            f"{result['status'].replace('_', ' ')}. Keep collecting headlines and let their horizons mature."
+            "No fair two-model out-of-sample comparison yet. "
+            f"{model_statuses}. Keep collecting headlines and let their horizons mature."
         )
         return
 
-    st.subheader("Out-of-sample research metrics")
-    values = result["metrics"]
-    row = st.columns(4)
-    row[0].metric("OOS rows", values["prediction_count"])
-    row[1].metric("Directional accuracy", _fmt_rate(values["directional_accuracy"]))
-    row[2].metric("Historical-rate baseline", _fmt_rate(values["historical_rate_accuracy"]))
-    row[3].metric("Brier score", f"{values['brier_score']:.4f}")
+    st.subheader("Common-window OOS diagnostics")
+    display = comparison["comparison"][
+        [
+            "model",
+            "prediction_count",
+            "directional_accuracy",
+            "historical_rate_accuracy",
+            "brier_score",
+            "roc_auc",
+            "spearman_ic",
+        ]
+    ].copy()
+    display.columns = [
+        "model",
+        "OOS rows",
+        "directional accuracy",
+        "historical-rate accuracy",
+        "Brier score",
+        "ROC AUC",
+        "Spearman IC",
+    ]
+    st.dataframe(display, width="stretch", hide_index=True)
     st.caption(
-        f"Model: {result['model_version']}. These are research diagnostics, not evidence of profitable alpha. "
-        "No threshold or strategy was optimized in this run."
+        "These full common-window diagnostics compare model behavior; they are not used to select the "
+        "model or probability threshold in the holdout audit below."
     )
-    predictions = result["predictions"].copy()
-    st.dataframe(
-        predictions[
-            [
-                "signal_session",
-                "ticker",
-                "predicted_probability",
-                "target_abnormal_return",
-                "train_rows",
-                "train_label_cutoff",
-            ]
-        ],
-        width="stretch",
-        hide_index=True,
+
+    st.subheader("Validation-selected event policy")
+    policy = select_and_evaluate_holdout_policy(
+        comparison["common_predictions"],
+        max_validation_selection_rate=max_selection_rate,
+        round_trip_cost_bps=round_trip_cost_bps,
     )
+    if policy["status"] != "ok":
+        st.info(
+            "No defensible held-out policy result yet: "
+            f"{policy['status'].replace('_', ' ')}. This is expected with short capture history."
+        )
+        return
+
+    values = policy["test"]
+    row = st.columns(4)
+    row[0].metric("Validation-selected model", policy["chosen_model"])
+    row[1].metric("Locked threshold", f"{policy['probability_threshold']:.2f}")
+    row[2].metric("Held-out selected events", values["selected_count"])
+    row[3].metric("Held-out mean net event return", _fmt_pct(values["mean_net_abnormal_return"]))
+    st.caption(
+        f"Selection used {policy['validation_session_count']} validation sessions; evaluation used "
+        f"{policy['test_session_count']} later sessions. {policy['purged_validation_rows']} boundary rows "
+        f"were purged because their labels were unavailable at the first test close. Cost assumption: "
+        f"{policy['round_trip_cost_bps']:.1f} bps per selected event."
+    )
+    st.warning(
+        "This is an event-level sensitivity audit, not portfolio P&L or turnover. Re-running after viewing "
+        "the held-out result makes that test exploratory; a production claim needs a preregistered policy "
+        "and a new untouched time period."
+    )
+    with st.expander("Validation candidate audit"):
+        st.dataframe(policy["candidates"], width="stretch", hide_index=True)
 
 
 def render_validation_lab() -> None:

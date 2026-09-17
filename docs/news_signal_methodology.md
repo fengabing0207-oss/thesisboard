@@ -36,20 +36,34 @@ VADER is a generic lexical baseline, not a finance-specialized language model. I
 
 The initial supported horizons are one and three benchmark sessions. Labels use split/dividend-adjusted closes and ThesisBoard's existing abnormal-return engine. A ticker must have an exact adjusted close on both the signal session and horizon end; the lab does not silently shift a label across a missing session. Rolling beta is estimated only from returns before the signal session. The engine accepts ticker-specific sector proxies, while the first UI slice currently runs the SPY beta-adjusted target without a sector mapping. Rows with missing prices or beta fallback are retained for audit but excluded from the strict modeling sample.
 
-## Chronological Evaluation
+## Chronological Model Evaluation
 
-The baseline is an expanding-window logistic regression. For each test session:
+The lab runs an expanding-window logistic regression baseline and a constrained random-forest challenger. Both models receive the same TF-IDF/VADER feature set and are compared only on their common ticker/session rows. The tree is intentionally depth- and leaf-constrained; adding capacity is not evidence of an improvement.
+
+For each test session:
 
 - TF-IDF vocabulary, scaling, and model parameters are fit from scratch;
 - a training row is eligible only if its `label_available_at` precedes the test-session close;
 - at least the configured number of rows and sessions must be available;
 - both outcome classes must exist in training.
 
-The lab reports out-of-sample probability diagnostics such as directional accuracy, a training-history positive-rate baseline, Brier score, log loss, ROC AUC when defined, and Spearman information coefficient when defined. The baseline probability is recomputed from each expanding training window; it is not inferred from the future test distribution.
+The lab reports out-of-sample probability diagnostics such as directional accuracy, a training-history positive-rate baseline, Brier score, log loss, ROC AUC when defined, and Spearman information coefficient when defined. The baseline probability is recomputed from each expanding training window; it is not inferred from the future test distribution. Full-window diagnostics are descriptive and do not choose the event policy.
+
+## Validation-Selected Event Policy
+
+The event-policy audit makes a chronological split inside the out-of-sample predictions. It considers a fixed threshold grid and both model families on the earlier validation segment. A candidate must satisfy the configured maximum selection rate and minimum signal count. Selection maximizes mean abnormal event return after subtracting one user-specified round-trip cost per selected event.
+
+Before selection, validation rows whose `label_available_at` is not earlier than the first test close are purged. The chosen model and probability threshold are then locked and evaluated on the later test segment. Test outcomes never enter the programmatic selection rule.
+
+This discipline does not survive repeated human tuning. If a user changes settings after seeing the test result, that period has become exploratory and a future untouched period is required for confirmation.
+
+## What The Event Policy Is Not
+
+Selected events are not a portfolio. The audit does not define capital allocation, concurrent-position handling, exits beyond the label horizon, cash drag, borrow constraints, or a daily position ledger. It therefore reports selection frequency and cost-adjusted mean event return, but does not report portfolio P&L or turnover. Those claims require a separate stateful backtest.
 
 ## Claims The Lab Does Not Make
 
-The first version does not optimize a trading threshold, position size, signal frequency, turnover, or transaction-cost-adjusted return. It does not claim alpha from an in-sample fit. Strategy evaluation belongs in a later layer after enough point-in-time observations and matured labels exist.
+The lab does not claim deployable alpha from model diagnostics or the synthetic demo. It does not recommend a security, size a position, calculate turnover, or claim portfolio-level transaction-cost-adjusted performance. A held-out event-policy result is still only one research estimate and needs confirmation on a newly accumulated, untouched period.
 
 ## Known Calendar Limitation
 

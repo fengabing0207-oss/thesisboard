@@ -13,9 +13,11 @@
 - Prototype adjusted-price and raw-headline evidence.
 - Immutable first-seen news capture and close-to-close session alignment.
 - TF-IDF/VADER chronological baseline with label-availability guards.
+- Common-window logistic/random-forest challenger comparison.
+- Purged validation-only model/threshold selection and held-out event-cost audit.
 - Event reaction tables.
 - Guardrails around daily-data causality.
-- Future: verified historical-news adapter and transaction-cost-aware strategy evaluation after enough point-in-time data exists.
+- Future: verified historical-news adapter and a stateful position-book/turnover backtest after enough point-in-time data exists.
 
 ## V2: Agentic Theme Classification And Semantic Expansion
 
