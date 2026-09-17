@@ -62,7 +62,7 @@ The `research_events` table records these event types:
 | `automation_run_failed` | Unexpected exception type and message; the exception is re-raised so the workflow fails visibly. |
 | `strategy_promotion_approved` / `strategy_promotion_rejected` | Explicit review decision. Each candidate can receive only one. |
 
-Expected early statuses such as `no_captured_headlines`, insufficient chronological rows, or insufficient validation/test sessions are successful no-candidate outcomes. They are evidence that the guardrails are working, not reasons to loosen the split after seeing results.
+Expected early statuses such as `no_captured_headlines`, `insufficient_matured_data`, insufficient chronological rows, or insufficient validation/test sessions are successful no-candidate outcomes. `insufficient_matured_data` is the normal cold-start state before captured headlines have forward-return labels; a non-empty dataset that fails the feature-availability audit remains a distinct fail-closed result. These states are evidence that the guardrails are working, not reasons to loosen the split after seeing results.
 
 ## Disable And Recover
 

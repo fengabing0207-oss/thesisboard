@@ -329,6 +329,15 @@ def compare_walk_forward_models(
     """Compare the linear baseline and tree challenger on identical OOS rows."""
 
     feature_audit = audit_feature_availability(dataset)
+    if dataset.empty and feature_audit["status"] == "no_rows":
+        return {
+            "status": "insufficient_matured_data",
+            "feature_availability_audit": feature_audit,
+            "prediction_availability_audit": {},
+            "models": {},
+            "common_predictions": {},
+            "comparison": pd.DataFrame(),
+        }
     if feature_audit["status"] != "ok":
         return {
             "status": "feature_availability_audit_failed",
