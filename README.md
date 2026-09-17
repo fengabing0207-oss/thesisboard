@@ -6,16 +6,19 @@ ThesisBoard is a user-controlled thematic trading research dashboard for testing
 
 This repository is in public-review MVP mode. The current `main` branch demonstrates a validation-first research workflow: record a thesis before its outcome is known, apply reproducible risk checks, and compare forward outcomes with market- and sector-adjusted benchmarks.
 
-The application has six pages:
+The application has seven pages:
 
 - **Home** — product scope and research constraints.
 - **Pre-Trade Check** — structured thesis capture, heuristic risk checks, and an append-only local journal.
 - **Market News** — a yfinance market snapshot, raw ticker headlines, and an optional Anthropic topic summary.
+- **News Signal Lab** — immutable first-seen headline capture, close-to-close target construction, and a chronological TF-IDF/VADER baseline.
 - **Validation Lab** — horizon-specific signal outcomes, abnormal returns, hit rates, and cohort base-rate comparisons.
 - **Methodology** — the reasoning behind the validation design.
 - **Roadmap** — planned evidence and automation layers.
 
 Market News shows the raw source headlines before any optional AI summary. The summary is limited to headline topics and does not provide an overall bullish/bearish verdict, predict price direction, or recommend a trade.
+
+See [News Signal Methodology](docs/news_signal_methodology.md) for the availability clock, immutable capture contract, target construction, and walk-forward evaluation rules.
 
 ## Run Locally
 
@@ -25,6 +28,8 @@ python -m streamlit run app.py
 ```
 
 The optional headline summary requires an `ANTHROPIC_API_KEY` in the local environment. The rest of the application runs without it.
+
+For an offline check of the News Signal Lab pipeline, run `python scripts/run_news_signal_demo.py`. Its data and relationship are synthetic and demonstrate plumbing only, not predictive performance.
 
 ## Deploy To Streamlit Community Cloud
 
@@ -47,8 +52,11 @@ The current methodological focus is validation before automation:
 
 - Validation Lab currently uses synthetic demo signals to demonstrate the workflow; it does not establish predictive power.
 - Market News depends on best-effort yfinance data and is not a complete point-in-time historical news archive.
+- News Signal Lab starts collecting availability history only when the user captures headlines; vendor timestamps are never treated as proof that an article was historically available to ThesisBoard.
+- The first News Signal Lab model is a research baseline, not a strategy backtest. It does not optimize a trading threshold or claim cost-adjusted alpha.
+- The first News Signal Lab UI uses a SPY beta-adjusted target; ticker-specific sector-proxy mappings remain an engine-level option.
 - The optional Anthropic output summarizes only the displayed headlines and can be unavailable when no local API key is configured.
-- The app does not yet train or deploy a news-return forecasting model.
+- The app does not deploy a forecasting model or generate live trade instructions.
 - No brokerage integration or trade execution.
 - No claims of predictive power.
 

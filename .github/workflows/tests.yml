@@ -25,3 +25,6 @@ jobs:
 
       - name: Run validation demo
         run: python scripts/run_validation_demo.py
+
+      - name: Run News Signal Lab synthetic demo
+        run: python scripts/run_news_signal_demo.py
