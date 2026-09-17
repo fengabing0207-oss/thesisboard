@@ -30,6 +30,7 @@ from .news_store import (
     storage_backend_info,
 )
 from .price_provider import CachingPriceProvider, YFinancePriceProvider
+from .research_readiness import summarize_model_dataset
 from .strategy_spec import StrategySpec
 
 
@@ -201,6 +202,12 @@ def run_research_cycle(
             benchmark_prices=benchmark,
             horizon_days=int(settings.horizon_days),
         )
+        dataset_readiness = summarize_model_dataset(
+            dataset,
+            min_train_sessions=int(settings.min_train_sessions),
+            min_validation_sessions=int(settings.min_validation_sessions),
+            min_test_sessions=int(settings.min_test_sessions),
+        )
         dataset_vintage = _dataset_vintage(dataset, settings, price_vintage)
         comparison = compare_walk_forward_models(
             dataset,
@@ -215,6 +222,7 @@ def run_research_cycle(
                 db_path=db_path,
                 details={
                     "dataset_rows": int(len(dataset)),
+                    "dataset_readiness": dataset_readiness,
                     "dataset_vintage": dataset_vintage,
                     "price_source": bundle.source,
                     "price_adjustment": bundle.adjustment,
@@ -253,6 +261,7 @@ def run_research_cycle(
                 db_path=db_path,
                 details={
                     "dataset_rows": int(len(dataset)),
+                    "dataset_readiness": dataset_readiness,
                     "dataset_vintage": dataset_vintage,
                     "price_source": bundle.source,
                     "price_adjustment": bundle.adjustment,
@@ -271,6 +280,7 @@ def run_research_cycle(
             "strategy_spec": policy["strategy_spec"],
             "dataset_vintage": dataset_vintage,
             "dataset_rows": int(len(dataset)),
+            "dataset_readiness": dataset_readiness,
             "selection_basis": "validation_only",
             "promotion_status": "pending_human_review",
             "auto_promoted": False,
@@ -320,6 +330,7 @@ def run_research_cycle(
             "strategy_spec_id": policy["strategy_spec_id"],
             "collection": collection_payload,
             "dataset_vintage": dataset_vintage,
+            "dataset_readiness": dataset_readiness,
         }
         append_research_event(
             event_type="automation_run_completed",

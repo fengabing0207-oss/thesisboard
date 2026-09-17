@@ -11,7 +11,7 @@ The application has seven pages:
 - **Home** — product scope and research constraints.
 - **Pre-Trade Check** — structured thesis capture, heuristic risk checks, and an append-only local journal.
 - **Market News** — a yfinance market snapshot, raw ticker headlines, and an optional Anthropic topic summary.
-- **News Signal Lab** — immutable first-seen headline capture, hashed point-in-time feature vintages, leakage-audited walk-forward evaluation, a locked rule-based `StrategySpec`, a turnover-aware held-out position book, and an append-only scheduled-research audit.
+- **News Signal Lab** — immutable first-seen headline capture, operational and model-window readiness checks, hashed point-in-time feature vintages, leakage-audited walk-forward evaluation, a locked rule-based `StrategySpec`, a turnover-aware held-out position book, and an append-only scheduled-research audit.
 - **Validation Lab** — horizon-specific signal outcomes, abnormal returns, hit rates, and cohort base-rate comparisons.
 - **Methodology** — the reasoning behind the validation design.
 - **Roadmap** — planned evidence and automation layers.
@@ -34,6 +34,8 @@ For an offline check of the News Signal Lab pipeline, run `python scripts/run_ne
 Build a real point-in-time headline history by running, for example, `python scripts/collect_news.py NVDA AVGO MRVL MU VRT ORCL INTC`. Each batch writes an immutable collection-run audit record.
 
 For a guarded collection-and-calibration cycle, run `python scripts/run_research_cycle.py`. The cycle re-evaluates matured history and may append a challenger `StrategySpec`, but it never promotes that candidate. Local SQLite is suitable for development only. Scheduled runners require `THESISBOARD_DATABASE_URL` to point to PostgreSQL and refuse to run otherwise.
+
+Each completed priced cycle records a `dataset_readiness` snapshot: signal, matured, and usable row/session counts; label balance; data-quality counts; and progress through the default 10-session training, 10-session validation, and 5-session test floor. This is a progress guardrail, not a countdown promise. Class diversity, minimum rows/signals, leakage audits, or policy constraints can require more history.
 
 The repository includes a two-hourly GitHub Actions workflow, disabled by default. After the workflow reaches the default branch, configure the `THESISBOARD_DATABASE_URL` repository secret, set the `THESISBOARD_AUTOMATION_ENABLED` repository variable to `true`, and optionally set `THESISBOARD_WATCHLIST`. A reviewed candidate is approved separately, for example:
 

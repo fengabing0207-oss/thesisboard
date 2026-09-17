@@ -8,6 +8,7 @@ def test_app_module_imports_with_pre_trade_page():
 
     assert hasattr(app, "render_pre_trade_check")
     assert hasattr(app, "render_news_signal_lab")
+    assert hasattr(app, "_render_research_readiness")
     assert hasattr(app, "main")
 
 
@@ -83,3 +84,14 @@ def test_pre_trade_page_runs_evaluator_on_submit():
     assert not at.exception
     subheaders = [s.value for s in at.subheader]
     assert "Heuristic risk check" in subheaders
+
+
+def test_news_signal_page_renders_readiness_before_model_training():
+    from streamlit.testing.v1 import AppTest
+
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    at = AppTest.from_file(str(app_path), default_timeout=30).run()
+    at.sidebar.radio[0].set_value("News Signal Lab").run()
+
+    assert not at.exception
+    assert "Research readiness" in [value.value for value in at.subheader]
