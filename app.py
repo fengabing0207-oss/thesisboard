@@ -10,8 +10,8 @@ import streamlit as st
 from src import market_news
 from src.demo_validation_data import EXPLICIT_OUTCOME_FIELDS, prepare_validation_lab_data
 from src.journal import append_record, load_records
+from src.news_signal_backtest import select_and_evaluate_holdout_strategy
 from src.news_signal_lab import build_news_return_dataset, compare_walk_forward_models
-from src.news_signal_policy import select_and_evaluate_holdout_policy
 from src.news_store import ingest_news_items, list_news_items, news_store_summary
 from src.pre_trade_check import (
     EventType,
@@ -449,16 +449,19 @@ def render_news_signal_lab() -> None:
         "A logistic baseline and constrained random-forest challenger use the same TF-IDF/VADER features "
         "and identical out-of-sample rows. Each refit sees only labels known before the test close."
     )
-    config = st.columns(4)
+    config = st.columns(5)
     horizon_days = config[0].selectbox("Forward horizon (sessions)", [1, 3], index=0)
     min_train_rows = int(
         config[1].number_input("Minimum chronological training rows", min_value=10, value=30, step=5)
     )
     round_trip_cost_bps = float(
-        config[2].number_input("Assumed event cost (bps)", min_value=0, value=10, step=1)
+        config[2].number_input("Assumed round-trip cost (bps)", min_value=0, value=10, step=1)
     )
     max_selection_rate = float(
         config[3].number_input("Max validation selection (%)", min_value=5, max_value=100, value=50, step=5)
+    ) / 100.0
+    max_daily_turnover = float(
+        config[4].number_input("Max validation daily turnover (%)", min_value=5, max_value=200, value=100, step=5)
     ) / 100.0
     if not st.button("Run locked evaluation", key="run_news_signal_evaluation"):
         st.caption("No model is trained automatically. Run only when you want a dated research snapshot.")
@@ -538,11 +541,14 @@ def render_news_signal_lab() -> None:
         "model or probability threshold in the holdout audit below."
     )
 
-    st.subheader("Validation-selected event policy")
-    policy = select_and_evaluate_holdout_policy(
+    st.subheader("Validation-selected strategy policy")
+    policy = select_and_evaluate_holdout_strategy(
         comparison["common_predictions"],
+        prices_by_ticker={ticker: bundle.prices[ticker] for ticker in tickers if ticker in bundle.prices},
+        benchmark_prices=benchmark,
         max_validation_selection_rate=max_selection_rate,
-        round_trip_cost_bps=round_trip_cost_bps,
+        max_validation_average_daily_turnover=max_daily_turnover,
+        one_way_cost_bps=round_trip_cost_bps / 2.0,
     )
     if policy["status"] != "ok":
         st.info(
@@ -551,7 +557,7 @@ def render_news_signal_lab() -> None:
         )
         return
 
-    values = policy["test"]
+    values = policy["test_event"]
     row = st.columns(4)
     row[0].metric("Validation-selected model", policy["chosen_model"])
     row[1].metric("Locked threshold", f"{policy['probability_threshold']:.2f}")
@@ -560,16 +566,61 @@ def render_news_signal_lab() -> None:
     st.caption(
         f"Selection used {policy['validation_session_count']} validation sessions; evaluation used "
         f"{policy['test_session_count']} later sessions. {policy['purged_validation_rows']} boundary rows "
-        f"were purged because their labels were unavailable at the first test close. Cost assumption: "
-        f"{policy['round_trip_cost_bps']:.1f} bps per selected event."
+        f"were purged because their labels were unavailable at the first test close. Candidate policies "
+        f"had to stay below {_fmt_rate(max_selection_rate)} selection and "
+        f"{_fmt_rate(max_daily_turnover)} average daily turnover."
     )
     st.warning(
-        "This is an event-level sensitivity audit, not portfolio P&L or turnover. Re-running after viewing "
-        "the held-out result makes that test exploratory; a production claim needs a preregistered policy "
-        "and a new untouched time period."
+        "Model and threshold maximize validation-period net return relative to exposure-matched SPY, subject "
+        "to the frequency and turnover limits. Re-running after viewing the held-out result makes that test "
+        "exploratory; a production claim needs a preregistered policy and a new untouched time period."
     )
     with st.expander("Validation candidate audit"):
         st.dataframe(policy["candidates"], width="stretch", hide_index=True)
+
+    st.subheader("Locked holdout position book")
+    backtest = policy["test_backtest"]
+    strategy = backtest["metrics"]
+    row = st.columns(5)
+    row[0].metric("Net cumulative return", _fmt_pct(strategy["net_cumulative_return"]))
+    row[1].metric(
+        "Exposure-matched SPY",
+        _fmt_pct(strategy["exposure_matched_market_return"]),
+    )
+    row[2].metric(
+        "Net minus matched SPY",
+        _fmt_pct(strategy["net_minus_exposure_matched_market"]),
+    )
+    row[3].metric("Total turnover", f"{strategy['total_turnover']:.2f}×")
+    row[4].metric("Max drawdown", _fmt_pct(strategy["max_drawdown"]))
+    st.caption(
+        f"The test book starts flat on {pd.Timestamp(policy['first_test_session']).date()}, equal-weights "
+        f"{strategy['unique_ticker_count']} selected ticker(s), collapses overlapping same-ticker signals, "
+        f"and charges {round_trip_cost_bps / 2.0:.1f} bps per one-way weight change. "
+        f"Average gross exposure was {_fmt_rate(strategy['average_gross_exposure'])}."
+    )
+    st.warning(
+        "This adjusted-close audit assumes the signal can be acted on at its eligible close and holds cash "
+        "at zero return. It is a reproducible research backtest, not executable live performance, and the "
+        "short held-out window cannot establish durable alpha."
+    )
+    st.dataframe(
+        backtest["daily"][
+            [
+                "session",
+                "period_end",
+                "active_tickers",
+                "gross_exposure",
+                "turnover",
+                "transaction_cost",
+                "gross_return",
+                "net_return",
+                "exposure_matched_market_return",
+            ]
+        ],
+        width="stretch",
+        hide_index=True,
+    )
 
 
 def render_validation_lab() -> None:

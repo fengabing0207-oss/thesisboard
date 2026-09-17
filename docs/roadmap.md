@@ -14,10 +14,11 @@
 - Immutable first-seen news capture and close-to-close session alignment.
 - TF-IDF/VADER chronological baseline with label-availability guards.
 - Common-window logistic/random-forest challenger comparison.
-- Purged validation-only model/threshold selection and held-out event-cost audit.
+- Purged validation-only model/threshold selection with frequency and turnover constraints.
+- Locked equal-weight position book with overlap-aware turnover and one-way costs.
 - Event reaction tables.
 - Guardrails around daily-data causality.
-- Future: verified historical-news adapter and a stateful position-book/turnover backtest after enough point-in-time data exists.
+- Future: verified historical-news adapter, delayed execution variants, and preregistered evaluation on newly accumulated data.
 
 ## V2: Agentic Theme Classification And Semantic Expansion
 
