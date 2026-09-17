@@ -16,6 +16,7 @@
 - Common-window logistic/random-forest challenger comparison.
 - Purged validation-only model/threshold selection with frequency and turnover constraints.
 - Locked equal-weight position book with overlap-aware turnover and one-way costs.
+- Repeatable watchlist collection with immutable collection-run audits and ticker-level coverage diagnostics.
 - Event reaction tables.
 - Guardrails around daily-data causality.
 - Future: verified historical-news adapter, delayed execution variants, and preregistered evaluation on newly accumulated data.

@@ -68,6 +68,25 @@ def init_news_store(db_path: Path | str = DB_PATH) -> None:
                 ON news_items(first_seen_at, id);
             CREATE INDEX IF NOT EXISTS idx_news_items_ticker_seen
                 ON news_items(ticker, first_seen_at, id);
+
+            CREATE TABLE IF NOT EXISTS news_collection_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                requested_tickers INTEGER NOT NULL,
+                successful_tickers INTEGER NOT NULL,
+                failed_tickers INTEGER NOT NULL,
+                fetched_items INTEGER NOT NULL,
+                inserted_versions INTEGER NOT NULL,
+                existing_versions INTEGER NOT NULL,
+                skipped_items INTEGER NOT NULL,
+                error_json TEXT NOT NULL,
+                schema_version TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_news_collection_runs_completed
+                ON news_collection_runs(completed_at, id);
             """
         )
 
@@ -239,6 +258,112 @@ def news_store_summary(db_path: Path | str = DB_PATH) -> dict:
             """
         ).fetchone()
     return dict(row)
+
+
+def record_collection_run(
+    *,
+    started_at,
+    completed_at,
+    provider: str,
+    requested_tickers: int,
+    successful_tickers: int,
+    failed_tickers: int,
+    fetched_items: int,
+    inserted_versions: int,
+    existing_versions: int,
+    skipped_items: int,
+    errors: dict[str, str] | None = None,
+    db_path: Path | str = DB_PATH,
+) -> int:
+    """Append one immutable collection-attempt audit record."""
+
+    counts = {
+        "requested_tickers": requested_tickers,
+        "successful_tickers": successful_tickers,
+        "failed_tickers": failed_tickers,
+        "fetched_items": fetched_items,
+        "inserted_versions": inserted_versions,
+        "existing_versions": existing_versions,
+        "skipped_items": skipped_items,
+    }
+    if any(int(value) < 0 for value in counts.values()):
+        raise ValueError("collection counts must be non-negative")
+    if int(successful_tickers) + int(failed_tickers) != int(requested_tickers):
+        raise ValueError("successful_tickers plus failed_tickers must equal requested_tickers")
+    source = str(provider).strip().lower()
+    if not source:
+        raise ValueError("provider is required")
+
+    init_news_store(db_path)
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO news_collection_runs
+            (started_at, completed_at, provider, requested_tickers,
+             successful_tickers, failed_tickers, fetched_items,
+             inserted_versions, existing_versions, skipped_items,
+             error_json, schema_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _required_utc_iso(started_at, field="started_at"),
+                _required_utc_iso(completed_at, field="completed_at"),
+                source,
+                *(int(counts[name]) for name in counts),
+                json.dumps(errors or {}, ensure_ascii=False, sort_keys=True),
+                SCHEMA_VERSION,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def list_collection_runs(
+    db_path: Path | str = DB_PATH,
+    *,
+    limit: int = 20,
+) -> list[dict]:
+    init_news_store(db_path)
+    if int(limit) <= 0:
+        return []
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, started_at, completed_at, provider, requested_tickers,
+                   successful_tickers, failed_tickers, fetched_items,
+                   inserted_versions, existing_versions, skipped_items,
+                   error_json, schema_version
+            FROM news_collection_runs
+            ORDER BY completed_at DESC, id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["errors"] = json.loads(item.pop("error_json"))
+        result.append(item)
+    return result
+
+
+def news_capture_coverage(db_path: Path | str = DB_PATH) -> list[dict]:
+    """Return ticker-level observation density; calendar dates are UTC dates."""
+
+    init_news_store(db_path)
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT ticker,
+                   COUNT(*) AS headline_versions,
+                   COUNT(DISTINCT substr(first_seen_at, 1, 10)) AS observed_dates,
+                   MIN(first_seen_at) AS first_seen_at,
+                   MAX(first_seen_at) AS last_seen_at
+            FROM news_items
+            GROUP BY ticker
+            ORDER BY observed_dates DESC, headline_versions DESC, ticker ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _required_utc_iso(value, *, field: str) -> str:
