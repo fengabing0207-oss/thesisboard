@@ -20,9 +20,12 @@
 - Hashed as-of feature vintages plus fail-closed feature/label leakage audits.
 - Versioned rule-based `StrategySpec` shared by validation and held-out calculation paths.
 - Explicit expanding-training, purged-validation, and later-test window metadata.
+- Durable PostgreSQL option for scheduled first-seen capture and research-event logging.
+- Disabled-by-default two-hourly collection/calibration workflow with fail-closed data refresh checks.
+- Validation-only challenger generation plus explicit human promotion/rejection events.
 - Event reaction tables.
 - Guardrails around daily-data causality.
-- Future: verified historical-news adapter, delayed execution variants, calibration/stability/subgroup diagnostics, and preregistered evaluation on newly accumulated data.
+- Future: verified historical-news adapter, delayed execution variants, calibration/stability/subgroup diagnostics, drift alerts, and preregistered evaluation on newly accumulated data.
 
 ## V2: Agentic Theme Classification And Semantic Expansion
 

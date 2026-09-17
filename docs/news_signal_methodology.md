@@ -17,7 +17,7 @@ Vendor publication time is never substituted for `first_seen_at`. This prevents 
 
 ## Immutable Capture
 
-Normalized headline versions are stored in an append-only SQLite table. Identical content is idempotent. If a provider changes the title, timestamp, publisher, or canonical URL, the changed content receives a new content hash and is stored as another immutable version. When multiple versions of the same article arrive before one signal close, feature construction uses only the latest version known by that close; the older version remains available for audit.
+Normalized headline versions are stored in an append-only table: SQLite for local development or PostgreSQL for durable scheduled runs. Identical content is idempotent. If a provider changes the title, timestamp, publisher, or canonical URL, the changed content receives a new content hash and is stored as another immutable version. When multiple versions of the same article arrive before one signal close, feature construction uses only the latest version known by that close; the older version remains available for audit.
 
 The repository ignores the local database. Captured headlines are user-local research data and must not be committed.
 
@@ -72,6 +72,14 @@ The policy audit makes a chronological split inside the out-of-sample prediction
 Before selection, validation rows whose `label_available_at` is not earlier than the first test close are purged. The chosen model and probability threshold are then locked and evaluated on the later test segment. Test outcomes never enter the programmatic selection rule.
 
 This discipline does not survive repeated human tuning. If a user changes settings after seeing the test result, that period has become exploratory and a future untouched period is required for confirmation.
+
+## Scheduled Research And Promotion Gate
+
+The optional scheduled loop combines three operations: capture newly observed headlines, rebuild the point-in-time matured dataset, and run the existing validation-only policy selection. It records start, collection, candidate, completion, failure, and promotion events in an append-only research-event ledger. A run with any ticker collection failure stops before model calibration so a stale or partially refreshed universe cannot silently generate a challenger.
+
+A successful cycle records the selected `StrategySpec`, dataset-vintage hash, exact input-price content hash, common-window model comparison, validation candidate grid, chronological windows, validation metrics, held-out diagnostics, calculation-parity result, price-source metadata, and the fact that automatic promotion was false. Repeating an identical spec against the identical dataset and price vintage records an unchanged event; new observations or revised price inputs create a fresh candidate even if the rule hash remains the same.
+
+Held-out diagnostics are never an input to the automated selection rule. The loop can only propose. Approval or rejection requires a separate explicit command, reviewer label, and append-only decision event. Strategy hashes are recomputed before approval, and the database uniquely constrains each candidate to one promotion decision. This is a review gate, not cryptographic user authentication.
 
 ## What The Event Policy Is Not
 

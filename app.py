@@ -16,8 +16,10 @@ from src.news_store import (
     ingest_news_items,
     list_collection_runs,
     list_news_items,
+    list_research_events,
     news_capture_coverage,
     news_store_summary,
+    storage_backend_info,
 )
 from src.pre_trade_check import (
     EventType,
@@ -28,6 +30,7 @@ from src.pre_trade_check import (
     evaluate_pre_trade_risk,
 )
 from src.price_provider import CachingPriceProvider, YFinancePriceProvider
+from src.research_automation import current_approved_strategy
 
 
 ROOT = Path(__file__).resolve().parent
@@ -83,7 +86,7 @@ GROUP_COLUMNS = [
 def main() -> None:
     st.set_page_config(page_title="ThesisBoard", layout="wide")
     st.title("ThesisBoard")
-    st.caption("User-controlled thematic trading research. Validation first, automation later.")
+    st.caption("User-controlled thematic trading research. Guarded automation, human promotion.")
 
     page = st.sidebar.radio(
         "Pages",
@@ -124,7 +127,10 @@ def render_home() -> None:
         "This deployable review branch focuses on the validation spine: horizons, abnormal returns, "
         "forward-return tracking, hit-rate/base-rate comparison, and reproducible rule-based validation."
     )
-    st.info("Current branch focus: validation spine, not full AI automation yet.")
+    st.info(
+        "Current branch focus: point-in-time validation and a guarded research loop. "
+        "Automation may propose a challenger but cannot promote one."
+    )
     st.warning("ThesisBoard is not financial advice and does not execute trades.")
 
 
@@ -415,6 +421,65 @@ def _render_market_news_capture(ticker: str, normalized_news: list) -> None:
         )
 
 
+def _render_research_automation_status() -> None:
+    st.subheader("Scheduled research loop")
+    backend = storage_backend_info()
+    events = list_research_events(limit=100)
+    completed = next(
+        (event for event in events if event["event_type"] == "automation_run_completed"),
+        None,
+    )
+    proposed = next(
+        (event for event in events if event["event_type"] == "strategy_candidate_proposed"),
+        None,
+    )
+    decided_candidate_ids = {
+        int(event["payload"]["candidate_event_id"])
+        for event in events
+        if event["event_type"].startswith("strategy_promotion_")
+        and event["payload"].get("candidate_event_id") is not None
+    }
+    pending = proposed is not None and int(proposed["id"]) not in decided_candidate_ids
+    champion = current_approved_strategy()
+
+    row = st.columns(4)
+    row[0].metric("Research store", backend["backend"])
+    row[1].metric(
+        "Latest cycle",
+        "never run" if completed is None else completed["payload"].get("status", "unknown"),
+    )
+    row[2].metric("Latest challenger", "pending review" if pending else "none pending")
+    row[3].metric(
+        "Approved champion",
+        "none" if champion is None else champion["strategy_spec_id"].split(":")[-1],
+    )
+    if backend["durable_for_scheduled_runs"]:
+        st.success(
+            "Durable storage is configured. The scheduler can collect and validate when its repository "
+            "enable switch is on. Candidate promotion always remains a separate human action."
+        )
+    else:
+        st.warning(
+            "This process is using local SQLite. Manual capture works, but scheduled runners refuse this "
+            "ephemeral backend; configure THESISBOARD_DATABASE_URL before enabling automation."
+        )
+    if pending:
+        st.info(
+            f"Candidate event #{proposed['id']} is awaiting explicit approval or rejection. "
+            "Its held-out metrics are diagnostic and were not used for automated selection."
+        )
+    if events:
+        with st.expander("Automation event audit"):
+            audit = pd.DataFrame(events)[
+                ["id", "event_time", "event_type", "run_id", "subject_id"]
+            ]
+            st.dataframe(audit, width="stretch", hide_index=True)
+            st.caption(
+                "Events are append-only. Held-out results are diagnostics, not inputs to automatic "
+                "selection, and no event path performs automatic promotion."
+            )
+
+
 def render_news_signal_lab() -> None:
     st.header("News Signal Lab")
     st.caption(
@@ -437,6 +502,8 @@ def render_news_signal_lab() -> None:
         coverage = f"{first} → {last}"
     metrics[2].metric("Observed coverage", coverage)
 
+    _render_research_automation_status()
+
     ticker_coverage = pd.DataFrame(news_capture_coverage())
     collection_runs = list_collection_runs(limit=10)
     if not ticker_coverage.empty:
@@ -453,7 +520,10 @@ def render_news_signal_lab() -> None:
 
     items = list_news_items()
     if not items:
-        st.info("No captured headlines yet. Use Market News → Capture current headlines to start the dataset.")
+        st.info(
+            "No captured headlines yet. Use Market News → Capture current headlines, "
+            "or enable the scheduled research loop, to start the dataset."
+        )
         return
 
     latest = pd.DataFrame(items[:100])

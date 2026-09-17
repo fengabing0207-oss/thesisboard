@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -22,6 +23,8 @@ import pandas as pd
 
 DB_PATH = Path(__file__).resolve().parents[1] / "data" / "news_signal_lab.db"
 SCHEMA_VERSION = "news-store.v1"
+RESEARCH_EVENT_SCHEMA_VERSION = "research-events.v1"
+DATABASE_URL_ENV = "THESISBOARD_DATABASE_URL"
 
 
 def utc_now() -> str:
@@ -43,6 +46,12 @@ def connect(db_path: Path | str = DB_PATH):
 
 
 def init_news_store(db_path: Path | str = DB_PATH) -> None:
+    database_url = _postgres_database_url(db_path)
+    if database_url:
+        from . import postgres_news_store
+
+        postgres_news_store.init_news_store(database_url)
+        return
     with connect(db_path) as conn:
         conn.executescript(
             """
@@ -87,6 +96,38 @@ def init_news_store(db_path: Path | str = DB_PATH) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_news_collection_runs_completed
                 ON news_collection_runs(completed_at, id);
+
+            CREATE TABLE IF NOT EXISTS research_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_time TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                subject_id TEXT NOT NULL DEFAULT '',
+                promotion_candidate_event_id INTEGER,
+                payload_json TEXT NOT NULL,
+                schema_version TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_research_events_run
+                ON research_events(run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_research_events_type_time
+                ON research_events(event_type, event_time, id);
+            """
+        )
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(research_events)").fetchall()
+        }
+        if "promotion_candidate_event_id" not in columns:
+            conn.execute(
+                "ALTER TABLE research_events "
+                "ADD COLUMN promotion_candidate_event_id INTEGER"
+            )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_research_events_promotion_candidate
+            ON research_events(promotion_candidate_event_id)
+            WHERE promotion_candidate_event_id IS NOT NULL
             """
         )
 
@@ -107,6 +148,18 @@ def ingest_news_items(
     Title-less entries are rejected because they cannot contribute text
     features. Re-ingesting identical content is idempotent.
     """
+
+    database_url = _postgres_database_url(db_path)
+    if database_url:
+        from . import postgres_news_store
+
+        return postgres_news_store.ingest_news_items(
+            database_url=database_url,
+            ticker=ticker,
+            items=items,
+            observed_at=observed_at,
+            provider=provider,
+        )
 
     symbol = str(ticker).strip().upper()
     if not symbol:
@@ -216,6 +269,15 @@ def list_news_items(
     ticker: str | None = None,
     limit: int | None = None,
 ) -> list[dict]:
+    database_url = _postgres_database_url(db_path)
+    if database_url:
+        from . import postgres_news_store
+
+        return postgres_news_store.list_news_items(
+            database_url=database_url,
+            ticker=ticker,
+            limit=limit,
+        )
     init_news_store(db_path)
     where = ""
     params: list[object] = []
@@ -246,6 +308,11 @@ def list_news_items(
 
 
 def news_store_summary(db_path: Path | str = DB_PATH) -> dict:
+    database_url = _postgres_database_url(db_path)
+    if database_url:
+        from . import postgres_news_store
+
+        return postgres_news_store.news_store_summary(database_url)
     init_news_store(db_path)
     with connect(db_path) as conn:
         row = conn.execute(
@@ -276,6 +343,25 @@ def record_collection_run(
     db_path: Path | str = DB_PATH,
 ) -> int:
     """Append one immutable collection-attempt audit record."""
+
+    database_url = _postgres_database_url(db_path)
+    if database_url:
+        from . import postgres_news_store
+
+        return postgres_news_store.record_collection_run(
+            database_url=database_url,
+            started_at=started_at,
+            completed_at=completed_at,
+            provider=provider,
+            requested_tickers=requested_tickers,
+            successful_tickers=successful_tickers,
+            failed_tickers=failed_tickers,
+            fetched_items=fetched_items,
+            inserted_versions=inserted_versions,
+            existing_versions=existing_versions,
+            skipped_items=skipped_items,
+            errors=errors,
+        )
 
     counts = {
         "requested_tickers": requested_tickers,
@@ -322,6 +408,14 @@ def list_collection_runs(
     *,
     limit: int = 20,
 ) -> list[dict]:
+    database_url = _postgres_database_url(db_path)
+    if database_url:
+        from . import postgres_news_store
+
+        return postgres_news_store.list_collection_runs(
+            database_url=database_url,
+            limit=limit,
+        )
     init_news_store(db_path)
     if int(limit) <= 0:
         return []
@@ -349,6 +443,11 @@ def list_collection_runs(
 def news_capture_coverage(db_path: Path | str = DB_PATH) -> list[dict]:
     """Return ticker-level observation density; calendar dates are UTC dates."""
 
+    database_url = _postgres_database_url(db_path)
+    if database_url:
+        from . import postgres_news_store
+
+        return postgres_news_store.news_capture_coverage(database_url)
     init_news_store(db_path)
     with connect(db_path) as conn:
         rows = conn.execute(
@@ -364,6 +463,168 @@ def news_capture_coverage(db_path: Path | str = DB_PATH) -> list[dict]:
             """
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def append_research_event(
+    *,
+    event_type: str,
+    run_id: str,
+    payload: dict,
+    subject_id: str = "",
+    promotion_candidate_event_id: int | None = None,
+    event_time=None,
+    db_path: Path | str = DB_PATH,
+) -> int:
+    """Append an immutable automation, candidate, or promotion event."""
+
+    kind = _clean_text(event_type).lower()
+    research_run = _clean_text(run_id)
+    subject = _clean_text(subject_id)
+    if not kind:
+        raise ValueError("event_type is required")
+    if not research_run:
+        raise ValueError("run_id is required")
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a dictionary")
+    is_promotion = kind in {
+        "strategy_promotion_approved",
+        "strategy_promotion_rejected",
+    }
+    if is_promotion != (promotion_candidate_event_id is not None):
+        raise ValueError(
+            "promotion events require promotion_candidate_event_id and other events must omit it"
+        )
+    candidate_id = (
+        None
+        if promotion_candidate_event_id is None
+        else int(promotion_candidate_event_id)
+    )
+    if candidate_id is not None and candidate_id <= 0:
+        raise ValueError("promotion_candidate_event_id must be positive")
+    timestamp = _required_utc_iso(event_time or utc_now(), field="event_time")
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=_json_default,
+    )
+
+    database_url = _postgres_database_url(db_path)
+    if database_url:
+        from . import postgres_news_store
+
+        return postgres_news_store.append_research_event(
+            database_url=database_url,
+            event_type=kind,
+            run_id=research_run,
+            subject_id=subject,
+            promotion_candidate_event_id=candidate_id,
+            event_time=timestamp,
+            payload_json=serialized,
+        )
+
+    init_news_store(db_path)
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO research_events
+            (event_time, event_type, run_id, subject_id,
+             promotion_candidate_event_id, payload_json, schema_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                timestamp,
+                kind,
+                research_run,
+                subject,
+                candidate_id,
+                serialized,
+                RESEARCH_EVENT_SCHEMA_VERSION,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def list_research_events(
+    db_path: Path | str = DB_PATH,
+    *,
+    event_type: str | None = None,
+    run_id: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    if int(limit) <= 0:
+        return []
+    database_url = _postgres_database_url(db_path)
+    if database_url:
+        from . import postgres_news_store
+
+        return postgres_news_store.list_research_events(
+            database_url=database_url,
+            event_type=event_type,
+            run_id=run_id,
+            limit=limit,
+        )
+
+    init_news_store(db_path)
+    clauses = []
+    params: list[object] = []
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(_clean_text(event_type).lower())
+    if run_id:
+        clauses.append("run_id = ?")
+        params.append(_clean_text(run_id))
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    params.append(int(limit))
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, event_time, event_type, run_id, subject_id,
+                   promotion_candidate_event_id,
+                   payload_json, schema_version
+            FROM research_events
+            {where}
+            ORDER BY event_time DESC, id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return [_research_event_dict(row) for row in rows]
+
+
+def get_research_event(
+    event_id: int,
+    db_path: Path | str = DB_PATH,
+) -> dict | None:
+    database_url = _postgres_database_url(db_path)
+    if database_url:
+        from . import postgres_news_store
+
+        return postgres_news_store.get_research_event(database_url, event_id)
+    init_news_store(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id, event_time, event_type, run_id, subject_id,
+                   promotion_candidate_event_id,
+                   payload_json, schema_version
+            FROM research_events
+            WHERE id = ?
+            """,
+            (int(event_id),),
+        ).fetchone()
+    return None if row is None else _research_event_dict(row)
+
+
+def storage_backend_info(db_path: Path | str = DB_PATH) -> dict:
+    """Describe storage without exposing a database URL or credentials."""
+
+    database_url = _postgres_database_url(db_path)
+    return {
+        "backend": "postgresql" if database_url else "sqlite",
+        "durable_for_scheduled_runs": bool(database_url),
+        "database_url_env": DATABASE_URL_ENV,
+    }
 
 
 def _required_utc_iso(value, *, field: str) -> str:
@@ -462,3 +723,38 @@ def _content_hash(
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _postgres_database_url(db_path: Path | str) -> str | None:
+    value = str(db_path).strip()
+    if value.startswith(("postgresql://", "postgres://")):
+        return value
+    try:
+        is_default = Path(db_path).expanduser().resolve() == DB_PATH.resolve()
+    except (OSError, TypeError, ValueError):
+        is_default = False
+    if not is_default:
+        return None
+    configured = os.getenv(DATABASE_URL_ENV, "").strip()
+    if not configured:
+        return None
+    if not configured.startswith(("postgresql://", "postgres://")):
+        raise ValueError(f"{DATABASE_URL_ENV} must be a PostgreSQL URL")
+    return configured
+
+
+def _research_event_dict(row) -> dict:
+    item = dict(row)
+    item["payload"] = json.loads(item.pop("payload_json"))
+    return item
+
+
+def _json_default(value):
+    if isinstance(value, (datetime, pd.Timestamp)):
+        timestamp = pd.Timestamp(value)
+        return timestamp.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if hasattr(value, "item"):
+        return value.item()
+    raise TypeError(f"unsupported JSON value: {type(value).__name__}")

@@ -8,7 +8,7 @@ calculations used the same rule set.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 import hashlib
 import json
 
@@ -103,6 +103,19 @@ class StrategySpec:
 
     def canonical_json(self) -> str:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "StrategySpec":
+        if not isinstance(payload, dict):
+            raise ValueError("StrategySpec payload must be a dictionary")
+        allowed = {field.name for field in fields(cls)}
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise ValueError(f"unknown StrategySpec fields: {unknown}")
+        values = dict(payload)
+        if "universe" in values:
+            values["universe"] = tuple(values["universe"])
+        return cls(**values)
 
     @property
     def spec_id(self) -> str:

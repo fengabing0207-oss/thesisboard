@@ -35,6 +35,23 @@ def test_strategy_spec_rejects_rules_the_engine_does_not_support():
         )
 
 
+def test_strategy_spec_round_trips_from_recorded_dictionary():
+    original = StrategySpec(
+        model_name="logistic",
+        model_version="tfidf-logit.v1",
+        probability_threshold=0.65,
+        holding_horizon_sessions=1,
+        universe=("NVDA", "AAPL"),
+    )
+
+    restored = StrategySpec.from_dict(original.to_dict())
+
+    assert restored == original
+    assert restored.spec_id == original.spec_id
+    with pytest.raises(ValueError, match="unknown StrategySpec fields"):
+        StrategySpec.from_dict({**original.to_dict(), "future_rule": "unsafe"})
+
+
 def test_calculation_parity_requires_same_spec_and_engine():
     base = {
         "status": "ok",

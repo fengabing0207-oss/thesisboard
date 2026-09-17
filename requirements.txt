@@ -7,3 +7,4 @@ yfinance
 anthropic
 scikit-learn==1.9.1
 vaderSentiment==3.3.2
+psycopg[binary]>=3.2,<4
