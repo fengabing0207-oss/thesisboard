@@ -172,6 +172,10 @@ def select_and_evaluate_holdout_policy(
                 "candidates": candidate_table,
                 "validation_session_count": int(len(validation_sessions)),
                 "test_session_count": int(len(test_sessions)),
+                "validation_predictions": {
+                    name: pair[0] for name, pair in frames.items()
+                },
+                "test_predictions": {name: pair[1] for name, pair in frames.items()},
             }
         )
         return result
@@ -202,6 +206,8 @@ def select_and_evaluate_holdout_policy(
             len(reference.loc[reference["signal_session"].isin(validation_sessions)])
             - len(validation)
         ),
+        "validation_predictions": {name: pair[0] for name, pair in frames.items()},
+        "test_predictions": {name: pair[1] for name, pair in frames.items()},
         "validation": evaluate_event_policy(
             validation,
             probability_threshold=threshold,

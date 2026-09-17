@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.news_signal_backtest import select_and_evaluate_holdout_strategy
 from src.news_signal_lab import build_news_return_dataset, compare_walk_forward_models, session_close_utc
-from src.news_signal_policy import select_and_evaluate_holdout_policy
 
 
 def main() -> None:
@@ -48,16 +48,20 @@ def main() -> None:
     result = compare_walk_forward_models(dataset, min_train_rows=20, min_train_sessions=20)
     if result["status"] != "ok":
         raise RuntimeError(f"synthetic News Signal Lab model comparison failed: {result['status']}")
-    policy = select_and_evaluate_holdout_policy(
+    policy = select_and_evaluate_holdout_strategy(
         result["common_predictions"],
+        prices_by_ticker={"DEMO": ticker},
+        benchmark_prices=benchmark,
         min_validation_sessions=10,
         min_test_sessions=5,
         min_validation_signals=5,
         max_validation_selection_rate=0.6,
-        round_trip_cost_bps=10,
+        max_validation_average_daily_turnover=1.0,
+        one_way_cost_bps=5,
     )
     if policy["status"] != "ok":
         raise RuntimeError(f"synthetic News Signal Lab policy audit failed: {policy['status']}")
+    backtest = policy["test_backtest"]
 
     print("ThesisBoard News Signal Lab synthetic demonstration")
     print("WARNING: generated data proves pipeline behavior only; it is not alpha evidence")
@@ -72,10 +76,14 @@ def main() -> None:
         f"threshold={policy['probability_threshold']:.2f}"
     )
     print(
-        f"held-out selected events={policy['test']['selected_count']} "
-        f"mean net event return={policy['test']['mean_net_abnormal_return']}"
+        f"held-out selected events={policy['test_event']['selected_count']} "
+        f"mean net event return={policy['test_event']['mean_net_abnormal_return']}"
     )
-    print("WARNING: event returns are not portfolio P&L or turnover")
+    print(
+        f"held-out net portfolio return={backtest['metrics']['net_cumulative_return']:.6f} "
+        f"total turnover={backtest['metrics']['total_turnover']:.3f}"
+    )
+    print("WARNING: synthetic adjusted-close results are not executable live performance")
 
 
 if __name__ == "__main__":

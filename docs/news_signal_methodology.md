@@ -49,9 +49,9 @@ For each test session:
 
 The lab reports out-of-sample probability diagnostics such as directional accuracy, a training-history positive-rate baseline, Brier score, log loss, ROC AUC when defined, and Spearman information coefficient when defined. The baseline probability is recomputed from each expanding training window; it is not inferred from the future test distribution. Full-window diagnostics are descriptive and do not choose the event policy.
 
-## Validation-Selected Event Policy
+## Validation-Selected Strategy Policy
 
-The event-policy audit makes a chronological split inside the out-of-sample predictions. It considers a fixed threshold grid and both model families on the earlier validation segment. A candidate must satisfy the configured maximum selection rate and minimum signal count. Selection maximizes mean abnormal event return after subtracting one user-specified round-trip cost per selected event.
+The policy audit makes a chronological split inside the out-of-sample predictions. It considers a fixed threshold grid and both model families on the earlier validation segment. A candidate must satisfy the configured maximum selection rate, minimum signal count, and maximum average daily turnover. Each candidate is passed through the stateful position book described below. Selection maximizes validation-period net compounded return minus the exposure-matched SPY return after realized weight-change costs, rather than optimizing an event average or a test-period statistic.
 
 Before selection, validation rows whose `label_available_at` is not earlier than the first test close are purged. The chosen model and probability threshold are then locked and evaluated on the later test segment. Test outcomes never enter the programmatic selection rule.
 
@@ -59,11 +59,19 @@ This discipline does not survive repeated human tuning. If a user changes settin
 
 ## What The Event Policy Is Not
 
-Selected events are not a portfolio. The audit does not define capital allocation, concurrent-position handling, exits beyond the label horizon, cash drag, borrow constraints, or a daily position ledger. It therefore reports selection frequency and cost-adjusted mean event return, but does not report portfolio P&L or turnover. Those claims require a separate stateful backtest.
+Selected-event averages are retained as a diagnostic, not a portfolio. They do not define capital allocation, concurrent-position handling, cash drag, or a daily position ledger. The separate position-book audit below supplies a deliberately narrow portfolio interpretation; the event table itself must not be called portfolio performance.
+
+## Locked Holdout Position Book
+
+The same position-book engine first evaluates candidates on the validation segment and then starts a fresh, flat book at the first test session for the locked model and threshold. A selected event creates a long position from its eligible signal close until its recorded horizon-end close. Concurrent active tickers are equal weighted, unallocated capital is zero-return cash, and overlapping selected events for one ticker collapse to one position instead of creating accidental leverage.
+
+At every close, turnover is the sum of absolute changes in ticker weights. The audit charges a configurable one-way cost per unit of turnover, including initial entry, rebalancing, and final liquidation. It reports gross and net compounded return, total and annualized turnover, average exposure, maximum drawdown, and an exposure-matched SPY comparison. Missing adjusted closes on any active interval fail the audit instead of silently shifting the trade.
+
+This is a reproducible accounting layer, not proof of executable performance. It assumes a signal using pre-close observations can transact at the eligible adjusted close, ignores bid/ask dynamics and market impact, assumes zero cash return, and does not model order fills, liquidity, borrow, taxes, or capacity. A real deployment claim would need a delayed execution rule, higher-quality point-in-time data, and an untouched future evaluation window.
 
 ## Claims The Lab Does Not Make
 
-The lab does not claim deployable alpha from model diagnostics or the synthetic demo. It does not recommend a security, size a position, calculate turnover, or claim portfolio-level transaction-cost-adjusted performance. A held-out event-policy result is still only one research estimate and needs confirmation on a newly accumulated, untouched period.
+The lab does not claim deployable alpha from model diagnostics, the synthetic demo, or the position-book audit. It does not recommend a security or size a live position. A held-out research result is still only one estimate and needs confirmation on a newly accumulated, untouched period.
 
 ## Known Calendar Limitation
 
