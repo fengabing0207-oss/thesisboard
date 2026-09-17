@@ -1,6 +1,12 @@
 import pytest
 
-from src.news_store import ingest_news_items, list_news_items, news_store_summary
+from src.news_store import (
+    ingest_news_items,
+    list_collection_runs,
+    list_news_items,
+    news_store_summary,
+    record_collection_run,
+)
 
 
 def test_news_store_is_idempotent_and_preserves_changed_versions(tmp_path):
@@ -105,3 +111,21 @@ def test_news_store_keeps_identity_query_parameters(tmp_path):
         "https://example.com/story?id=one",
         "https://example.com/story?id=two",
     }
+
+
+def test_collection_run_rejects_inconsistent_counts(tmp_path):
+    with pytest.raises(ValueError, match="must equal"):
+        record_collection_run(
+            started_at="2026-09-17T16:00:00Z",
+            completed_at="2026-09-17T16:01:00Z",
+            provider="yfinance",
+            requested_tickers=2,
+            successful_tickers=1,
+            failed_tickers=0,
+            fetched_items=0,
+            inserted_versions=0,
+            existing_versions=0,
+            skipped_items=0,
+            db_path=tmp_path / "news.db",
+        )
+    assert list_collection_runs(tmp_path / "news.db") == []

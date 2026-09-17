@@ -230,6 +230,13 @@ def fetch_ticker_news(symbol: str) -> list:
     return news or []
 
 
+def fetch_ticker_news_strict(symbol: str) -> list:
+    """Fetch news while preserving provider failures for audited collectors."""
+    import yfinance as yf
+
+    return yf.Ticker(symbol).news or []
+
+
 def fetch_next_earnings_date(symbol: str):
     """Best-effort next earnings date via yfinance; None on any problem."""
     import yfinance as yf

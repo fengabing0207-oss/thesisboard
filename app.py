@@ -12,7 +12,13 @@ from src.demo_validation_data import EXPLICIT_OUTCOME_FIELDS, prepare_validation
 from src.journal import append_record, load_records
 from src.news_signal_backtest import select_and_evaluate_holdout_strategy
 from src.news_signal_lab import build_news_return_dataset, compare_walk_forward_models
-from src.news_store import ingest_news_items, list_news_items, news_store_summary
+from src.news_store import (
+    ingest_news_items,
+    list_collection_runs,
+    list_news_items,
+    news_capture_coverage,
+    news_store_summary,
+)
 from src.pre_trade_check import (
     EventType,
     InstrumentType,
@@ -430,6 +436,20 @@ def render_news_signal_lab() -> None:
         last = pd.Timestamp(summary["last_seen_at"]).date()
         coverage = f"{first} → {last}"
     metrics[2].metric("Observed coverage", coverage)
+
+    ticker_coverage = pd.DataFrame(news_capture_coverage())
+    collection_runs = list_collection_runs(limit=10)
+    if not ticker_coverage.empty:
+        st.subheader("Capture readiness")
+        st.caption(
+            "Independent observed dates matter more than headline count. Repeated headlines on one day do not "
+            "create a defensible chronological sample."
+        )
+        st.dataframe(ticker_coverage, width="stretch", hide_index=True)
+    if collection_runs:
+        with st.expander("Collection run audit"):
+            runs = pd.DataFrame(collection_runs).drop(columns=["errors"], errors="ignore")
+            st.dataframe(runs, width="stretch", hide_index=True)
 
     items = list_news_items()
     if not items:

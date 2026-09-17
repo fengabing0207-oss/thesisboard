@@ -31,6 +31,8 @@ The optional headline summary requires an `ANTHROPIC_API_KEY` in the local envir
 
 For an offline check of the News Signal Lab pipeline, run `python scripts/run_news_signal_demo.py`. Its data and relationship are synthetic and demonstrate plumbing only, not predictive performance.
 
+Build a real point-in-time headline history by running, for example, `python scripts/collect_news.py NVDA AVGO MRVL MU VRT ORCL INTC`. Each batch writes an immutable collection-run audit record. Schedule that command externally if desired; the repository does not claim that a local process is always running.
+
 ## Deploy To Streamlit Community Cloud
 
 - Repository: `fengabing0207-oss/thesisboard`
