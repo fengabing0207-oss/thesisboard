@@ -270,6 +270,51 @@ def test_cycle_stops_before_calibration_when_collection_is_incomplete(
     ) == []
 
 
+def test_cycle_logs_empty_bootstrap_as_insufficient_matured_data(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "news.db"
+    provider = _seed_store_and_prices(db_path)
+    empty_dataset = pd.DataFrame(
+        columns=[
+            "ticker",
+            "signal_session",
+            "signal_close_at",
+            "as_of_timestamp",
+            "first_seen_at_max",
+            "data_vintage",
+            "availability_rule_version",
+            "target_definition",
+            "label_available_at",
+            "usable_for_model",
+        ]
+    )
+    monkeypatch.setattr(
+        automation,
+        "build_news_return_dataset",
+        lambda *args, **kwargs: empty_dataset,
+    )
+
+    result = automation.run_research_cycle(
+        ["AAA"],
+        db_path=db_path,
+        fetcher=lambda ticker: [],
+        price_provider=provider,
+        now="2026-09-17T16:00:00Z",
+        run_id="cycle-bootstrap",
+    )
+
+    assert result["status"] == "insufficient_matured_data"
+    assert result["dataset_rows"] == 0
+    assert result["candidate_event_id"] is None
+    completed = list_research_events(
+        db_path,
+        event_type="automation_run_completed",
+        run_id="cycle-bootstrap",
+    )
+    assert completed[0]["payload"]["status"] == "insufficient_matured_data"
+
+
 def test_cycle_logs_unhandled_failure_without_swallowing_it(tmp_path, monkeypatch):
     db_path = tmp_path / "news.db"
     _seed_store_and_prices(db_path)
