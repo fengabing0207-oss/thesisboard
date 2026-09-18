@@ -270,6 +270,42 @@ def test_model_comparison_uses_identical_oos_rows():
     assert result["prediction_availability_audit"]["status"] == "ok"
 
 
+def test_model_comparison_classifies_empty_bootstrap_as_insufficient_data():
+    result = compare_walk_forward_models(
+        _walk_forward_frame().iloc[0:0],
+        min_train_rows=6,
+        min_train_sessions=6,
+    )
+
+    assert result["status"] == "insufficient_matured_data"
+    assert result["feature_availability_audit"]["status"] == "no_rows"
+    assert result["models"] == {}
+
+
+def test_model_comparison_does_not_treat_missing_schema_as_bootstrap():
+    result = compare_walk_forward_models(pd.DataFrame())
+
+    assert result["status"] == "feature_availability_audit_failed"
+    assert result["feature_availability_audit"]["status"] == (
+        "missing_required_columns"
+    )
+
+
+def test_model_comparison_keeps_real_availability_failure_fail_closed():
+    frame = _walk_forward_frame()
+    frame.loc[0, "first_seen_at_max"] = frame.loc[0, "as_of_timestamp"]
+
+    result = compare_walk_forward_models(
+        frame,
+        min_train_rows=6,
+        min_train_sessions=6,
+    )
+
+    assert result["status"] == "feature_availability_audit_failed"
+    assert result["feature_availability_audit"]["status"] == "failed"
+    assert result["models"] == {}
+
+
 def test_feature_availability_audit_rejects_post_as_of_observation():
     frame = _walk_forward_frame()
     frame.loc[0, "first_seen_at_max"] = frame.loc[0, "as_of_timestamp"]
