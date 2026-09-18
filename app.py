@@ -30,6 +30,7 @@ from src.pre_trade_check import (
     evaluate_pre_trade_risk,
 )
 from src.price_provider import CachingPriceProvider, YFinancePriceProvider
+from src.research_readiness import build_research_readiness, summarize_model_dataset
 from src.research_automation import current_approved_strategy
 
 
@@ -480,6 +481,66 @@ def _render_research_automation_status() -> None:
             )
 
 
+def _render_research_readiness(items: list[dict], collection_runs: list[dict]) -> None:
+    report = build_research_readiness(
+        news_items=items,
+        collection_runs=collection_runs,
+        research_events=list_research_events(limit=100),
+        storage=storage_backend_info(),
+        now=pd.Timestamp.now(tz="UTC"),
+    )
+    st.subheader("Research readiness")
+    exact = report["dataset_readiness"]
+    row = st.columns(4)
+    if exact:
+        phase = str(exact["phase"]).replace("_", " ")
+        row[0].metric("Current phase", phase)
+        row[1].metric(
+            "Usable signal sessions",
+            f"{exact['usable_sessions']} / {exact['target_sessions']}",
+        )
+        row[2].metric("Matured / usable rows", f"{exact['matured_rows']} / {exact['usable_rows']}")
+        row[3].metric("Proxy sessions remaining", exact["remaining_proxy_sessions"])
+        st.progress(float(exact["progress_fraction"]))
+    else:
+        row[0].metric("Current phase", "operational warm-up")
+        row[1].metric(
+            "Complete collection weekdays",
+            report["complete_collection_weekdays"],
+        )
+        row[2].metric(
+            "Universe captured",
+            f"{len(report['captured_tickers'])} / {len(report['expected_tickers'])}",
+        )
+        row[3].metric("Target session floor", report["target_sessions"])
+        st.progress(
+            min(
+                1.0,
+                report["complete_collection_weekdays"] / report["target_sessions"],
+            )
+        )
+
+    if report["status"] == "attention_required":
+        st.error("Collection is not healthy enough to wait passively; resolve the failed checks below.")
+    elif report["status"] == "minimum_window_reached":
+        st.success(
+            "The minimum session floor is present. This permits evaluation; it does not prove the signal."
+        )
+    else:
+        st.info(
+            "Collection is in progress. The dashboard will keep exposing operational failures while labels "
+            "mature; it will not shorten or waive the chronological holdout."
+        )
+
+    checks = pd.DataFrame(report["checks"])
+    st.dataframe(checks, width="stretch", hide_index=True)
+    st.caption(
+        "Complete collection weekdays measure scheduler continuity, not model-ready sessions. Exact usable "
+        "session progress comes from the latest priced research cycle and may be lower. The 25-session floor "
+        "is 10 training + 10 validation + 5 test sessions and is not a guarantee of a candidate."
+    )
+
+
 def render_news_signal_lab() -> None:
     st.header("News Signal Lab")
     st.caption(
@@ -505,7 +566,10 @@ def render_news_signal_lab() -> None:
     _render_research_automation_status()
 
     ticker_coverage = pd.DataFrame(news_capture_coverage())
-    collection_runs = list_collection_runs(limit=10)
+    # Keep enough history for a 25-session cold-start window at a two-hour cadence.
+    collection_runs = list_collection_runs(limit=1_000)
+    items = list_news_items()
+    _render_research_readiness(items, collection_runs)
     if not ticker_coverage.empty:
         st.subheader("Capture readiness")
         st.caption(
@@ -515,10 +579,9 @@ def render_news_signal_lab() -> None:
         st.dataframe(ticker_coverage, width="stretch", hide_index=True)
     if collection_runs:
         with st.expander("Collection run audit"):
-            runs = pd.DataFrame(collection_runs).drop(columns=["errors"], errors="ignore")
+            runs = pd.DataFrame(collection_runs[:10]).drop(columns=["errors"], errors="ignore")
             st.dataframe(runs, width="stretch", hide_index=True)
 
-    items = list_news_items()
     if not items:
         st.info(
             "No captured headlines yet. Use Market News → Capture current headlines, "
@@ -582,6 +645,19 @@ def render_news_signal_lab() -> None:
         benchmark_prices=benchmark,
         horizon_days=int(horizon_days),
     )
+    dataset_readiness = summarize_model_dataset(dataset)
+    readiness_row = st.columns(4)
+    readiness_row[0].metric("Usable sessions", dataset_readiness["usable_sessions"])
+    readiness_row[1].metric("Matured rows", dataset_readiness["matured_rows"])
+    readiness_row[2].metric("Usable rows", dataset_readiness["usable_rows"])
+    readiness_row[3].metric(
+        "Proxy sessions remaining",
+        dataset_readiness["remaining_proxy_sessions"],
+    )
+    st.caption(
+        "The session target is only a minimum chronological-window floor. Class diversity, row count, "
+        "signal count, leakage audits, and policy constraints can require additional history."
+    )
     st.subheader("Dataset audit")
     quality = (
         dataset["data_quality_flag"].value_counts(dropna=False).rename_axis("status").reset_index(name="rows")
@@ -631,6 +707,7 @@ def render_news_signal_lab() -> None:
             "directional_accuracy",
             "historical_rate_accuracy",
             "brier_score",
+            "historical_rate_brier",
             "roc_auc",
             "spearman_ic",
         ]
@@ -641,13 +718,15 @@ def render_news_signal_lab() -> None:
         "directional accuracy",
         "historical-rate accuracy",
         "Brier score",
+        "historical-rate Brier",
         "ROC AUC",
         "Spearman IC",
     ]
     st.dataframe(display, width="stretch", hide_index=True)
     st.caption(
-        "These full common-window diagnostics compare model behavior; they are not used to select the "
-        "model or probability threshold in the holdout audit below."
+        "Historical-rate accuracy and Brier score are the no-text baseline. A model that cannot beat this "
+        "baseline has not earned its complexity. These diagnostics are not used to select the model or "
+        "probability threshold in the holdout audit below."
     )
 
     st.subheader("Validation-selected strategy policy")

@@ -64,6 +64,15 @@ The `research_events` table records these event types:
 
 Expected early statuses such as `no_captured_headlines`, `insufficient_matured_data`, insufficient chronological rows, or insufficient validation/test sessions are successful no-candidate outcomes. `insufficient_matured_data` is the normal cold-start state before captured headlines have forward-return labels; a non-empty dataset that fails the feature-availability audit remains a distinct fail-closed result. These states are evidence that the guardrails are working, not reasons to loosen the split after seeing results.
 
+## Readiness During Cold Start
+
+News Signal Lab reports two separate kinds of progress:
+
+- **Operational readiness** checks durable storage, the latest collection result, scheduler freshness, expected-universe capture, and timezone-aware `observed_at` provenance.
+- **Model-window readiness** is written into each completed priced-cycle event as `dataset_readiness`. It counts exact matured and usable signal sessions against the configured training, validation, and test floors.
+
+Complete collection weekdays are only a scheduler-continuity proxy. They are not interchangeable with usable signal sessions: a day without an eligible headline or a mature, clean return label does not create a model row. Reaching the default 25-session floor permits the full evaluation gate to run but does not guarantee a candidate or establish predictive power.
+
 ## Disable And Recover
 
 Set `THESISBOARD_AUTOMATION_ENABLED` to anything other than `true` to stop future cron jobs. Existing headlines and events remain untouched. Because records are append-only, an incorrect approval is not edited or deleted; record a superseding reviewed candidate in a future product change. Investigate repeated provider failures before re-enabling rather than allowing partial-universe calibration.

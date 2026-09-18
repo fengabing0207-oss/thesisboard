@@ -100,6 +100,8 @@ def test_cycle_proposes_without_promoting_and_deduplicates_identical_vintage(
     assert len(candidate["payload"]["price_vintage"]) == 64
     assert candidate["payload"]["model_comparison_oos"][0]["model"] == "logistic"
     assert candidate["payload"]["validation_candidate_audit"][0]["eligible"] is True
+    assert candidate["payload"]["dataset_readiness"]["usable_sessions"] == 1
+    assert first["dataset_readiness"]["phase"] == "building_training_window"
     assert list_research_events(
         db_path, event_type="strategy_promotion_approved"
     ) == []
