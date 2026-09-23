@@ -13,6 +13,10 @@ Every experiment distinguishes four timestamps:
 3. `signal_session`: the first regular market close at which the captured headline can enter a daily close-to-close feature set. Headlines first observed at or after 4:00 p.m. America/New_York move to the next benchmark session.
 4. `label_available_at`: the market close when the forward-return horizon finishes and the target becomes observable.
 
+Scheduled calibration adds a 90-minute settlement delay after
+`label_available_at`. A daily price row returned by an upstream provider before
+that cutoff is treated as provisional and cannot create a matured label.
+
 Vendor publication time is never substituted for `first_seen_at`. This prevents a recently installed system from pretending that it possessed old headlines historically.
 
 ## Immutable Capture
@@ -75,7 +79,21 @@ This discipline does not survive repeated human tuning. If a user changes settin
 
 ## Scheduled Research And Promotion Gate
 
-The optional scheduled loop combines three operations: capture newly observed headlines, rebuild the point-in-time matured dataset, and run the existing validation-only policy selection. It records start, collection, candidate, completion, failure, and promotion events in an append-only research-event ledger. A run with any ticker collection failure stops before model calibration so a stale or partially refreshed universe cannot silently generate a challenger.
+Scheduled headline capture and model calibration are separate workflows. Capture
+runs every two hours; calibration runs once on weekday evenings after the label
+settlement delay. Calibration takes one final headline snapshot, rebuilds the
+point-in-time matured dataset, and runs the existing validation-only policy
+selection. It records start, collection, integrity checkpoint, candidate,
+completion, failure, and promotion events in an append-only research-event
+ledger. A run with any ticker collection failure stops before model calibration
+so a stale or partially refreshed universe cannot silently generate a challenger.
+
+Each successful calibration checkpoints the settled ticker/session labels for
+one exact universe, horizon, benchmark, and settlement-delay contract. A later
+run under that same contract fails closed if usable sessions decrease, a settled
+label disappears, or its direction flips. Non-directional return revisions
+remain visible in the integrity audit and create a new dataset vintage, but do
+not silently overwrite the prior checkpoint.
 
 A successful cycle records the selected `StrategySpec`, dataset-vintage hash, exact input-price content hash, common-window model comparison, validation candidate grid, chronological windows, validation metrics, held-out diagnostics, calculation-parity result, price-source metadata, and the fact that automatic promotion was false. Repeating an identical spec against the identical dataset and price vintage records an unchanged event; new observations or revised price inputs create a fresh candidate even if the rule hash remains the same.
 
