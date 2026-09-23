@@ -115,6 +115,60 @@ def test_dataset_refuses_shifted_label_when_ticker_session_is_missing():
     assert bool(dataset.iloc[0]["usable_for_model"]) is False
 
 
+def test_dataset_does_not_mature_a_label_before_the_close_is_settled():
+    sessions, ticker, benchmark = _price_fixture()
+    signal_day = sessions[40]
+    horizon_end = sessions[41]
+    news = [
+        {
+            "ticker": "NVDA",
+            "title": "Demand expands",
+            "first_seen_at": session_close_utc(signal_day) - pd.Timedelta(minutes=1),
+        }
+    ]
+
+    dataset = build_news_return_dataset(
+        news,
+        prices_by_ticker={"NVDA": ticker},
+        benchmark_prices=benchmark,
+        horizon_days=1,
+        labels_as_of=session_close_utc(horizon_end) + pd.Timedelta(minutes=30),
+        label_settlement_delay_minutes=90,
+    )
+
+    row = dataset.iloc[0]
+    assert row["data_quality_flag"] == "label_not_settled"
+    assert row["label_available_at"] == session_close_utc(horizon_end)
+    assert bool(row["is_matured"]) is False
+    assert bool(row["usable_for_model"]) is False
+    assert pd.isna(row["target_positive"])
+
+
+def test_dataset_matures_a_label_after_the_settlement_delay():
+    sessions, ticker, benchmark = _price_fixture()
+    signal_day = sessions[40]
+    horizon_end = sessions[41]
+    news = [
+        {
+            "ticker": "NVDA",
+            "title": "Demand expands",
+            "first_seen_at": session_close_utc(signal_day) - pd.Timedelta(minutes=1),
+        }
+    ]
+
+    dataset = build_news_return_dataset(
+        news,
+        prices_by_ticker={"NVDA": ticker},
+        benchmark_prices=benchmark,
+        horizon_days=1,
+        labels_as_of=session_close_utc(horizon_end) + pd.Timedelta(minutes=90),
+        label_settlement_delay_minutes=90,
+    )
+
+    assert dataset.iloc[0]["data_quality_flag"] == "ok"
+    assert bool(dataset.iloc[0]["usable_for_model"]) is True
+
+
 def test_dataset_uses_latest_article_version_within_a_session():
     sessions, ticker, benchmark = _price_fixture()
     signal_day = sessions[40]

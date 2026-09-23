@@ -132,6 +132,8 @@ def build_news_return_dataset(
     prices_by_ticker: dict[str, pd.Series],
     benchmark_prices: pd.Series,
     horizon_days: int = 1,
+    labels_as_of=None,
+    label_settlement_delay_minutes: int = 0,
     sector_prices_by_ticker: dict[str, pd.Series] | None = None,
     sector_proxy_by_ticker: dict[str, str] | None = None,
     analyzer=None,
@@ -149,6 +151,15 @@ def build_news_return_dataset(
         str(key).strip().upper(): str(value).strip().upper()
         for key, value in (sector_proxy_by_ticker or {}).items()
     }
+    label_cutoff = None
+    if labels_as_of is not None:
+        label_cutoff = pd.Timestamp(labels_as_of)
+        if label_cutoff.tzinfo is None:
+            raise ValueError("labels_as_of must include a timezone")
+        label_cutoff = label_cutoff.tz_convert("UTC")
+    if int(label_settlement_delay_minutes) < 0:
+        raise ValueError("label_settlement_delay_minutes must be non-negative")
+    settlement_delay = pd.Timedelta(minutes=int(label_settlement_delay_minutes))
     grouped: dict[tuple[str, pd.Timestamp], dict[str, dict]] = {}
     for item in news_items or []:
         if not isinstance(item, dict) or not item.get("title") or not item.get("first_seen_at"):
@@ -207,8 +218,27 @@ def build_news_return_dataset(
         if latest_benchmark_session < horizon_end:
             rows.append(_unlabeled_row(row, "unmatured_horizon", horizon_end=horizon_end))
             continue
+        label_available_at = session_close_utc(horizon_end)
+        label_settled_at = label_available_at + settlement_delay
+        if label_cutoff is not None and label_cutoff < label_settled_at:
+            rows.append(
+                _unlabeled_row(
+                    row,
+                    "label_not_settled",
+                    horizon_end=horizon_end,
+                    label_available_at=label_available_at,
+                )
+            )
+            continue
         if signal_session not in ticker_prices.index or horizon_end not in ticker_prices.index:
-            rows.append(_unlabeled_row(row, "missing_ticker_session_price", horizon_end=horizon_end))
+            rows.append(
+                _unlabeled_row(
+                    row,
+                    "missing_ticker_session_price",
+                    horizon_end=horizon_end,
+                    label_available_at=label_available_at,
+                )
+            )
             continue
 
         sector_prices = sector_prices_by_ticker.get(ticker)
@@ -218,7 +248,14 @@ def build_news_return_dataset(
             or signal_session not in sector_prices.index
             or horizon_end not in sector_prices.index
         ):
-            rows.append(_unlabeled_row(row, "missing_sector_session_price", horizon_end=horizon_end))
+            rows.append(
+                _unlabeled_row(
+                    row,
+                    "missing_sector_session_price",
+                    horizon_end=horizon_end,
+                    label_available_at=label_available_at,
+                )
+            )
             continue
         summary = abnormal_return_summary(
             ticker_prices=ticker_prices,
@@ -234,7 +271,7 @@ def build_news_return_dataset(
         row.update(
             {
                 "horizon_end": horizon_end,
-                "label_available_at": session_close_utc(horizon_end),
+                "label_available_at": label_available_at,
                 "target_raw_return": summary["raw_return"],
                 "target_abnormal_return": target,
                 "target_positive": None if target is None else int(target > 0),
@@ -627,11 +664,17 @@ def _prediction_metrics(predictions: pd.DataFrame) -> dict:
     return metrics
 
 
-def _unlabeled_row(row: dict, flag: str, *, horizon_end=None) -> dict:
+def _unlabeled_row(
+    row: dict,
+    flag: str,
+    *,
+    horizon_end=None,
+    label_available_at=None,
+) -> dict:
     return {
         **row,
         "horizon_end": horizon_end,
-        "label_available_at": None,
+        "label_available_at": label_available_at,
         "target_raw_return": None,
         "target_abnormal_return": None,
         "target_positive": None,
