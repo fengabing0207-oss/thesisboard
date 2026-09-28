@@ -1,20 +1,19 @@
-name: News research cycle
+name: News headline collection
 
 on:
   schedule:
-    # 23:30 UTC is after 6:30 p.m. New York in both daylight and standard time.
-    - cron: "30 23 * * 1-5"
+    - cron: "17 */2 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: news-research-cycle
+  group: news-headline-collection
   cancel-in-progress: false
 
 jobs:
-  calibrate-settled-labels:
+  collect-headlines:
     if: github.event_name == 'workflow_dispatch' || vars.THESISBOARD_AUTOMATION_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -37,9 +36,9 @@ jobs:
       - name: Require durable storage
         run: |
           if [ -z "$THESISBOARD_DATABASE_URL" ]; then
-            echo "THESISBOARD_DATABASE_URL is required for scheduled calibration."
+            echo "THESISBOARD_DATABASE_URL is required for scheduled collection."
             exit 1
           fi
 
-      - name: Run settled-label research cycle
-        run: python scripts/run_research_cycle.py --require-durable
+      - name: Capture immutable headline snapshot
+        run: python scripts/collect_news.py --require-durable

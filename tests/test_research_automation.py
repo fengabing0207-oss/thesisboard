@@ -352,4 +352,130 @@ def test_cycle_config_rejects_unsafe_ranges():
         automation.ResearchCycleConfig(max_validation_selection_rate=1.1)
     with pytest.raises(ValueError, match="one_way_cost_bps"):
         automation.ResearchCycleConfig(one_way_cost_bps=-1)
+    with pytest.raises(ValueError, match="settlement_delay"):
+        automation.ResearchCycleConfig(label_settlement_delay_minutes=-1)
     assert automation.ResearchCycleConfig(benchmark_symbol=" spy ").benchmark_symbol == "SPY"
+
+
+def test_cycle_fails_closed_when_settled_sessions_disappear(tmp_path, monkeypatch):
+    db_path = tmp_path / "news.db"
+    provider = _seed_store_and_prices(db_path)
+    _configure_success(monkeypatch)
+    first = automation.run_research_cycle(
+        ["AAA"],
+        db_path=db_path,
+        fetcher=lambda ticker: [],
+        price_provider=provider,
+        now="2026-09-17T16:00:00Z",
+        run_id="cycle-integrity-baseline",
+    )
+    assert first["dataset_integrity"]["status"] == "baseline_created"
+
+    original_builder = automation.build_news_return_dataset
+
+    def regressed_dataset(*args, **kwargs):
+        frame = original_builder(*args, **kwargs)
+        frame["usable_for_model"] = False
+        frame["is_matured"] = False
+        frame["data_quality_flag"] = "missing_ticker_session_price"
+        frame["target_positive"] = None
+        frame["target_abnormal_return"] = None
+        return frame
+
+    monkeypatch.setattr(automation, "build_news_return_dataset", regressed_dataset)
+    monkeypatch.setattr(
+        automation,
+        "compare_walk_forward_models",
+        lambda *args, **kwargs: pytest.fail("calibration must stop on regression"),
+    )
+    regressed = automation.run_research_cycle(
+        ["AAA"],
+        db_path=db_path,
+        fetcher=lambda ticker: [],
+        price_provider=provider,
+        now="2026-09-18T16:00:00Z",
+        run_id="cycle-integrity-regressed",
+    )
+
+    assert regressed["status"] == "dataset_integrity_regressed"
+    violation_types = {
+        item["type"] for item in regressed["dataset_integrity"]["violations"]
+    }
+    assert "usable_sessions_decreased" in violation_types
+    assert "settled_labels_removed" in violation_types
+    violations = list_research_events(
+        db_path,
+        event_type="dataset_integrity_violation",
+        run_id="cycle-integrity-regressed",
+    )
+    assert len(violations) == 1
+
+
+def test_cycle_fails_closed_when_a_settled_label_flips(tmp_path, monkeypatch):
+    db_path = tmp_path / "news.db"
+    provider = _seed_store_and_prices(db_path)
+    _configure_success(monkeypatch)
+    automation.run_research_cycle(
+        ["AAA"],
+        db_path=db_path,
+        fetcher=lambda ticker: [],
+        price_provider=provider,
+        now="2026-09-17T16:00:00Z",
+        run_id="cycle-label-baseline",
+    )
+
+    original_builder = automation.build_news_return_dataset
+
+    def flipped_dataset(*args, **kwargs):
+        frame = original_builder(*args, **kwargs)
+        usable = frame["usable_for_model"].fillna(False)
+        frame.loc[usable, "target_positive"] = 1 - frame.loc[
+            usable, "target_positive"
+        ].astype(int)
+        frame.loc[usable, "target_abnormal_return"] *= -1
+        return frame
+
+    monkeypatch.setattr(automation, "build_news_return_dataset", flipped_dataset)
+    result = automation.run_research_cycle(
+        ["AAA"],
+        db_path=db_path,
+        fetcher=lambda ticker: [],
+        price_provider=provider,
+        now="2026-09-18T16:00:00Z",
+        run_id="cycle-label-flipped",
+    )
+
+    assert result["status"] == "dataset_integrity_regressed"
+    assert any(
+        item["type"] == "settled_label_direction_changed"
+        for item in result["dataset_integrity"]["violations"]
+    )
+
+
+def test_integrity_checkpoint_is_scoped_to_the_research_contract(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "news.db"
+    provider = _seed_store_and_prices(db_path)
+    _configure_success(monkeypatch)
+    first = automation.run_research_cycle(
+        ["AAA"],
+        db_path=db_path,
+        fetcher=lambda ticker: [],
+        price_provider=provider,
+        now="2026-09-17T16:00:00Z",
+        run_id="cycle-one-day-horizon",
+    )
+    changed_contract = automation.run_research_cycle(
+        ["AAA"],
+        config=automation.ResearchCycleConfig(horizon_days=3),
+        db_path=db_path,
+        fetcher=lambda ticker: [],
+        price_provider=provider,
+        now="2026-09-18T16:00:00Z",
+        run_id="cycle-three-day-horizon",
+    )
+
+    assert first["dataset_integrity"]["status"] == "baseline_created"
+    assert changed_contract["dataset_integrity"]["status"] == "baseline_created"
+    assert changed_contract["status"] == "candidate_proposed"

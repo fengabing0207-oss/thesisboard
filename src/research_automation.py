@@ -34,7 +34,7 @@ from .research_readiness import summarize_model_dataset
 from .strategy_spec import StrategySpec
 
 
-AUTOMATION_VERSION = "scheduled-research-loop.v1"
+AUTOMATION_VERSION = "scheduled-research-loop.v2"
 PRICE_CACHE = Path(__file__).resolve().parents[1] / "data" / "automation_price_cache"
 
 
@@ -52,6 +52,7 @@ class ResearchCycleConfig:
     one_way_cost_bps: float = 5.0
     benchmark_symbol: str = "SPY"
     price_lookback_calendar_days: int = 240
+    label_settlement_delay_minutes: int = 90
 
     def __post_init__(self) -> None:
         benchmark = str(self.benchmark_symbol).strip().upper()
@@ -76,6 +77,8 @@ class ResearchCycleConfig:
             raise ValueError("benchmark_symbol is required")
         if int(self.price_lookback_calendar_days) < 30:
             raise ValueError("price_lookback_calendar_days must be at least 30")
+        if int(self.label_settlement_delay_minutes) < 0:
+            raise ValueError("label_settlement_delay_minutes must be non-negative")
 
 
 def run_research_cycle(
@@ -201,6 +204,10 @@ def run_research_cycle(
             },
             benchmark_prices=benchmark,
             horizon_days=int(settings.horizon_days),
+            labels_as_of=timestamp,
+            label_settlement_delay_minutes=int(
+                settings.label_settlement_delay_minutes
+            ),
         )
         dataset_readiness = summarize_model_dataset(
             dataset,
@@ -209,6 +216,62 @@ def run_research_cycle(
             min_test_sessions=int(settings.min_test_sessions),
         )
         dataset_vintage = _dataset_vintage(dataset, settings, price_vintage)
+        label_manifest = _settled_label_manifest(dataset)
+        integrity_scope = {
+            "universe": list(symbols),
+            "horizon_days": int(settings.horizon_days),
+            "benchmark_symbol": settings.benchmark_symbol,
+            "label_settlement_delay_minutes": int(
+                settings.label_settlement_delay_minutes
+            ),
+        }
+        dataset_integrity = _check_dataset_integrity(
+            db_path=db_path,
+            dataset_readiness=dataset_readiness,
+            label_manifest=label_manifest,
+            integrity_scope=integrity_scope,
+        )
+        if dataset_integrity["status"] == "regressed":
+            append_research_event(
+                event_type="dataset_integrity_violation",
+                run_id=cycle_id,
+                payload={
+                    **dataset_integrity,
+                    "dataset_vintage": dataset_vintage,
+                    "price_vintage": price_vintage,
+                },
+                db_path=db_path,
+            )
+            return _complete_without_candidate(
+                cycle_id,
+                status="dataset_integrity_regressed",
+                collection=collection_payload,
+                db_path=db_path,
+                details={
+                    "dataset_rows": int(len(dataset)),
+                    "dataset_readiness": dataset_readiness,
+                    "dataset_vintage": dataset_vintage,
+                    "dataset_integrity": dataset_integrity,
+                    "price_source": bundle.source,
+                    "price_adjustment": bundle.adjustment,
+                    "price_vintage": price_vintage,
+                    "missing_symbols": bundle.missing_symbols,
+                },
+            )
+        checkpoint_id = append_research_event(
+            event_type="dataset_integrity_checkpoint",
+            run_id=cycle_id,
+            payload={
+                "dataset_readiness": dataset_readiness,
+                "integrity_scope": integrity_scope,
+                "label_manifest": label_manifest,
+                "label_manifest_hash": dataset_integrity["label_manifest_hash"],
+                "dataset_vintage": dataset_vintage,
+                "price_vintage": price_vintage,
+            },
+            db_path=db_path,
+        )
+        dataset_integrity["checkpoint_event_id"] = checkpoint_id
         comparison = compare_walk_forward_models(
             dataset,
             min_train_rows=int(settings.min_train_rows),
@@ -224,6 +287,7 @@ def run_research_cycle(
                     "dataset_rows": int(len(dataset)),
                     "dataset_readiness": dataset_readiness,
                     "dataset_vintage": dataset_vintage,
+                    "dataset_integrity": dataset_integrity,
                     "price_source": bundle.source,
                     "price_adjustment": bundle.adjustment,
                     "price_vintage": price_vintage,
@@ -263,6 +327,7 @@ def run_research_cycle(
                     "dataset_rows": int(len(dataset)),
                     "dataset_readiness": dataset_readiness,
                     "dataset_vintage": dataset_vintage,
+                    "dataset_integrity": dataset_integrity,
                     "price_source": bundle.source,
                     "price_adjustment": bundle.adjustment,
                     "price_vintage": price_vintage,
@@ -281,6 +346,7 @@ def run_research_cycle(
             "dataset_vintage": dataset_vintage,
             "dataset_rows": int(len(dataset)),
             "dataset_readiness": dataset_readiness,
+            "dataset_integrity": dataset_integrity,
             "selection_basis": "validation_only",
             "promotion_status": "pending_human_review",
             "auto_promoted": False,
@@ -331,6 +397,7 @@ def run_research_cycle(
             "collection": collection_payload,
             "dataset_vintage": dataset_vintage,
             "dataset_readiness": dataset_readiness,
+            "dataset_integrity": dataset_integrity,
         }
         append_research_event(
             event_type="automation_run_completed",
@@ -458,6 +525,136 @@ def _complete_without_candidate(
         db_path=db_path,
     )
     return payload
+
+
+def _settled_label_manifest(dataset: pd.DataFrame) -> list[dict]:
+    if dataset.empty or "usable_for_model" not in dataset:
+        return []
+    usable = dataset.loc[dataset["usable_for_model"].fillna(False)].copy()
+    if usable.empty:
+        return []
+    records = []
+    for row in usable.sort_values(["signal_session", "ticker"]).itertuples():
+        records.append(
+            {
+                "ticker": str(row.ticker),
+                "signal_session": pd.Timestamp(row.signal_session).date().isoformat(),
+                "label_available_at": pd.Timestamp(row.label_available_at).isoformat(),
+                "target_positive": int(row.target_positive),
+                "target_abnormal_return": float(row.target_abnormal_return),
+            }
+        )
+    return records
+
+
+def _check_dataset_integrity(
+    *,
+    db_path,
+    dataset_readiness: dict,
+    label_manifest: list[dict],
+    integrity_scope: dict,
+) -> dict:
+    canonical = json.dumps(label_manifest, sort_keys=True, separators=(",", ":"))
+    manifest_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    checkpoints = list_research_events(
+        db_path,
+        event_type="dataset_integrity_checkpoint",
+        limit=100,
+    )
+    previous = [
+        event
+        for event in checkpoints
+        if event["payload"].get("integrity_scope") == integrity_scope
+    ][:1]
+    if not previous:
+        return {
+            "status": "baseline_created",
+            "previous_checkpoint_event_id": None,
+            "label_manifest_hash": manifest_hash,
+            "checked_labels": len(label_manifest),
+            "non_directional_return_revision_count": 0,
+            "non_directional_return_revision_examples": [],
+            "violations": [],
+        }
+
+    checkpoint = previous[0]
+    payload = checkpoint["payload"]
+    previous_readiness = payload.get("dataset_readiness", {})
+    previous_manifest = payload.get("label_manifest", [])
+    previous_by_key = {
+        (str(row.get("ticker", "")), str(row.get("signal_session", ""))): row
+        for row in previous_manifest
+    }
+    current_by_key = {
+        (str(row.get("ticker", "")), str(row.get("signal_session", ""))): row
+        for row in label_manifest
+    }
+    violations = []
+
+    previous_sessions = int(previous_readiness.get("usable_sessions", 0))
+    current_sessions = int(dataset_readiness.get("usable_sessions", 0))
+    if current_sessions < previous_sessions:
+        violations.append(
+            {
+                "type": "usable_sessions_decreased",
+                "previous": previous_sessions,
+                "current": current_sessions,
+            }
+        )
+
+    removed = sorted(previous_by_key.keys() - current_by_key.keys())
+    if removed:
+        violations.append(
+            {
+                "type": "settled_labels_removed",
+                "count": len(removed),
+                "examples": [list(key) for key in removed[:10]],
+            }
+        )
+
+    direction_flips = []
+    return_revisions = []
+    for key in sorted(previous_by_key.keys() & current_by_key.keys()):
+        old = previous_by_key[key]
+        new = current_by_key[key]
+        if int(old["target_positive"]) != int(new["target_positive"]):
+            direction_flips.append(
+                {
+                    "ticker": key[0],
+                    "signal_session": key[1],
+                    "previous": int(old["target_positive"]),
+                    "current": int(new["target_positive"]),
+                }
+            )
+            continue
+        old_return = float(old["target_abnormal_return"])
+        new_return = float(new["target_abnormal_return"])
+        if abs(old_return - new_return) > 1e-12:
+            return_revisions.append(
+                {
+                    "ticker": key[0],
+                    "signal_session": key[1],
+                    "previous": old_return,
+                    "current": new_return,
+                }
+            )
+    if direction_flips:
+        violations.append(
+            {
+                "type": "settled_label_direction_changed",
+                "count": len(direction_flips),
+                "examples": direction_flips[:10],
+            }
+        )
+    return {
+        "status": "regressed" if violations else "ok",
+        "previous_checkpoint_event_id": int(checkpoint["id"]),
+        "label_manifest_hash": manifest_hash,
+        "checked_labels": len(label_manifest),
+        "non_directional_return_revision_count": len(return_revisions),
+        "non_directional_return_revision_examples": return_revisions[:10],
+        "violations": violations,
+    }
 
 
 def _dataset_vintage(

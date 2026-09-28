@@ -61,7 +61,8 @@ def main() -> int:
         )
         return 1
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
-    return 1 if result["status"] == "failed" else 0
+    fail_closed_statuses = {"failed", "dataset_integrity_regressed"}
+    return 1 if result["status"] in fail_closed_statuses else 0
 
 
 def _configured_watchlist() -> tuple[str, ...]:
