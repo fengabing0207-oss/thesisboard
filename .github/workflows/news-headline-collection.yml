@@ -2,7 +2,9 @@ name: News headline collection
 
 on:
   schedule:
-    - cron: "17 */2 * * *"
+    # Wake hourly so a dropped GitHub schedule delivery self-heals on the next slot.
+    # The freshness gate below preserves an approximately two-hour collection cadence.
+    - cron: "37 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -41,4 +43,7 @@ jobs:
           fi
 
       - name: Capture immutable headline snapshot
-        run: python scripts/collect_news.py --require-durable
+        run: >-
+          python scripts/collect_news.py
+          --require-durable
+          --min-interval-minutes 90
