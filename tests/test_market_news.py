@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from src.market_news import (
     anthropic_api_key_available,
@@ -10,6 +11,9 @@ from src.market_news import (
     headlines_from_news,
     normalize_news,
     summarize_headlines,
+    fetch_ticker_news,
+    fetch_ticker_news_result,
+    NewsFetchError,
 )
 
 
@@ -180,3 +184,73 @@ def test_summarize_headlines_receives_only_normalized_headlines():
     assert "NoTitle" not in sent
     # no price/return data leaked into the prompt
     assert "return_5d" not in sent
+
+
+def test_healthy_ticker_feed_does_not_call_search(monkeypatch):
+    import yfinance as yf
+
+    raw = [{"content": {"title": "New factory"}}]
+    monkeypatch.setattr(yf, "Ticker", lambda symbol: SimpleNamespace(news=raw))
+    monkeypatch.setattr(yf, "Search", lambda *a, **k: pytest.fail("unneeded fallback"))
+    result = fetch_ticker_news_result("NVDA")
+    assert result.items == raw
+    assert result.method == "ticker_news"
+    assert result.fallback_reason is None
+
+
+@pytest.mark.parametrize("primary", [[], None, {"message": "Not Found"}, [{}]])
+def test_empty_or_malformed_primary_uses_only_tagged_search_news(monkeypatch, primary):
+    import yfinance as yf
+
+    monkeypatch.setattr(yf, "Ticker", lambda symbol: SimpleNamespace(news=primary))
+    calls = []
+    valid = {"title": "New factory", "relatedTickers": ["nvda", "AMD"]}
+
+    def search(symbol, **kwargs):
+        calls.append(symbol)
+        return SimpleNamespace(news=[
+            valid,
+            {"title": "Unrelated", "relatedTickers": ["AMD"]},
+            {"title": "Untagged"},
+            {"title": "Substring trap", "relatedTickers": "NVDA2"},
+            {"title": "  ", "relatedTickers": ["NVDA"]},
+            {"title": {"bad": "shape"}, "relatedTickers": ["NVDA"]},
+        ])
+
+    monkeypatch.setattr(yf, "Search", search)
+    result = fetch_ticker_news_result(" nvda ")
+    assert calls == ["NVDA"]
+    assert result.items == [valid]
+    assert result.method == "search_news"
+    assert result.fallback_reason == "ticker_news returned no usable headlines"
+
+
+def test_provider_exception_falls_back_without_leaking_error_text(monkeypatch):
+    import yfinance as yf
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("sensitive provider detail")
+
+    monkeypatch.setattr(yf, "Ticker", broken)
+    monkeypatch.setattr(yf, "Search", lambda *a, **k: SimpleNamespace(
+        news=[{"title": "New factory", "relatedTickers": ["NVDA"]}]
+    ))
+    result = fetch_ticker_news_result("NVDA")
+    assert result.fallback_reason == "ticker_news raised RuntimeError"
+    monkeypatch.setattr(yf, "Search", broken)
+    with pytest.raises(NewsFetchError) as exc:
+        fetch_ticker_news_result("NVDA")
+    assert "sensitive" not in str(exc.value)
+    assert "search_news raised RuntimeError" in str(exc.value)
+
+
+@pytest.mark.parametrize("fallback", [[], None, {"message": "Not Found"},
+                                     [{"title": "Other", "relatedTickers": ["AMD"]}]])
+def test_both_feeds_unusable_raise_instead_of_silent_success(monkeypatch, fallback):
+    import yfinance as yf
+
+    monkeypatch.setattr(yf, "Ticker", lambda symbol: SimpleNamespace(news=[]))
+    monkeypatch.setattr(yf, "Search", lambda *a, **k: SimpleNamespace(news=fallback))
+    with pytest.raises(NewsFetchError, match="no usable symbol-tagged"):
+        fetch_ticker_news_result("NVDA")
+    assert fetch_ticker_news("NVDA") == []  # UI remains best-effort.

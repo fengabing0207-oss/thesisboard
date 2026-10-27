@@ -61,8 +61,14 @@ def main() -> int:
         )
         return 1
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
-    fail_closed_statuses = {"failed", "dataset_integrity_regressed"}
-    return 1 if result["status"] in fail_closed_statuses else 0
+    fail_closed_statuses = {
+        "failed", "collection_incomplete", "no_captured_headlines",
+        "missing_benchmark_prices", "dataset_integrity_regressed",
+    }
+    failed = result["status"] in fail_closed_statuses
+    if failed and os.getenv("GITHUB_ACTIONS") == "true":
+        print("::error::Research cycle stopped by a data-health guard; inspect JSON diagnostics.", file=sys.stderr)
+    return 1 if failed else 0
 
 
 def _configured_watchlist() -> tuple[str, ...]:

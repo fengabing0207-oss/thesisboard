@@ -72,8 +72,9 @@ def main() -> int:
         )
         return 0
     result = collect_ticker_news(tickers, db_path=args.db)
-    printable = {key: value for key, value in result.items() if key != "per_ticker"}
-    print(json.dumps(printable, indent=2, sort_keys=True))
+    print(json.dumps(result, indent=2, sort_keys=True))
+    if result["failed_tickers"] and os.getenv("GITHUB_ACTIONS") == "true":
+        print("::error::News collection incomplete; inspect per-ticker diagnostics.", file=sys.stderr)
     return 1 if result["failed_tickers"] else 0
 
 
@@ -96,6 +97,7 @@ def _latest_fresh_collection(
         or latest["successful_tickers"] != expected
         or latest["failed_tickers"] != 0
         or latest["errors"]
+        or int(latest["inserted_versions"]) + int(latest["existing_versions"]) == 0
     ):
         return None
     completed_at = datetime.fromisoformat(

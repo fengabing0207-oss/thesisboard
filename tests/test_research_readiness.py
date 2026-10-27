@@ -69,12 +69,16 @@ def test_operational_readiness_uses_latest_watchlist_and_exact_dataset_progress(
             "completed_at": "2026-09-17T18:00:00Z",
             "requested_tickers": 2,
             "successful_tickers": 2,
+            "inserted_versions": 0,
+            "existing_versions": 20,
             "failed_tickers": 0,
         },
         {
             "completed_at": "2026-09-16T18:00:00Z",
             "requested_tickers": 2,
             "successful_tickers": 2,
+            "inserted_versions": 0,
+            "existing_versions": 20,
             "failed_tickers": 0,
         },
     ]
@@ -149,3 +153,20 @@ def test_readiness_config_rejects_zero_thresholds():
         ReadinessConfig(stale_after_hours=0)
     with pytest.raises(ValueError, match="session requirements"):
         ReadinessConfig(min_test_sessions=0)
+
+
+def test_legacy_empty_success_is_not_operational_progress():
+    report = build_research_readiness(
+        news_items=[{"ticker": "AAA", "first_seen_at": "2026-09-17T12:00:00Z",
+                     "availability_basis": "observed_at"}],
+        collection_runs=[{
+            "completed_at": "2026-10-27T12:00:00Z", "requested_tickers": 1,
+            "successful_tickers": 1, "failed_tickers": 0,
+            "fetched_items": 0, "inserted_versions": 0, "existing_versions": 0,
+        }],
+        research_events=[], storage={"durable_for_scheduled_runs": True},
+        now="2026-10-27T13:00:00Z", config=ReadinessConfig(expected_tickers=("AAA",)),
+    )
+    assert report["status"] == "attention_required"
+    assert report["complete_collection_weekdays"] == 0
+    assert next(c for c in report["checks"] if c["check"] == "Latest collection")["status"] == "fail"

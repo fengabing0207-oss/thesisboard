@@ -12,6 +12,7 @@ functions, which are what the tests exercise with mocked data.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 import pandas as pd
@@ -221,20 +222,84 @@ def fetch_market_prices(symbols, *, lookback_days: int = 180, provider=None, end
 
 
 def fetch_ticker_news(symbol: str) -> list:
-    import yfinance as yf
-
     try:
-        news = yf.Ticker(symbol).news
+        return fetch_ticker_news_strict(symbol)
     except Exception:
         return []
-    return news or []
+
+
+class NewsFetchError(RuntimeError):
+    """No usable ticker headlines could be verified from the provider."""
+
+
+@dataclass(frozen=True)
+class NewsFetchResult:
+    items: list[dict]
+    method: str
+    fallback_reason: str | None = None
+
+
+def _titled_news(raw_news) -> list[dict]:
+    if not isinstance(raw_news, (list, tuple)):
+        return []
+    items = []
+    for entry in raw_news:
+        if isinstance(entry, dict):
+            title = _normalize_news_item(entry)["title"]
+            if isinstance(title, str) and title.strip():
+                items.append(entry)
+    return items
+
+
+def fetch_ticker_news_result(symbol: str) -> NewsFetchResult:
+    """Use ticker news, falling back to symbol-tagged Yahoo search news.
+
+    Yahoo's /xhr/ncp endpoint can return JSON 404s that yfinance turns
+    into []. An empty/invalid feed is therefore unverified, not a healthy
+    zero-news observation. Search results need an exact relatedTickers match
+    to avoid treating fuzzy or general-market results as company headlines.
+    Both routes retain the yfinance provider identity for cross-route dedup.
+    """
+    import yfinance as yf
+
+    symbol = str(symbol).strip().upper()
+    if not symbol:
+        raise ValueError("ticker is required")
+    try:
+        items = _titled_news(yf.Ticker(symbol).news)
+        if items:
+            return NewsFetchResult(items=items, method="ticker_news")
+        reason = "ticker_news returned no usable headlines"
+    except Exception as exc:
+        # Persist diagnostic types, never provider exception text/credentials.
+        reason = f"ticker_news raised {type(exc).__name__}"
+
+    try:
+        raw_news = yf.Search(
+            symbol, max_results=0, news_count=10, timeout=15,
+        ).news
+    except Exception as exc:
+        raise NewsFetchError(
+            f"{reason}; search_news raised {type(exc).__name__}"
+        ) from None
+    items = [
+        entry for entry in _titled_news(raw_news)
+        if isinstance(entry.get("relatedTickers"), (list, tuple))
+        and symbol in {
+            value.strip().upper() for value in entry["relatedTickers"]
+            if isinstance(value, str)
+        }
+    ]
+    if not items:
+        raise NewsFetchError(
+            f"{reason}; search_news returned no usable symbol-tagged headlines"
+        )
+    return NewsFetchResult(items=items, method="search_news", fallback_reason=reason)
 
 
 def fetch_ticker_news_strict(symbol: str) -> list:
-    """Fetch news while preserving provider failures for audited collectors."""
-    import yfinance as yf
-
-    return yf.Ticker(symbol).news or []
+    """Fetch usable news or raise; an empty response is not verified success."""
+    return fetch_ticker_news_result(symbol).items
 
 
 def fetch_next_earnings_date(symbol: str):
