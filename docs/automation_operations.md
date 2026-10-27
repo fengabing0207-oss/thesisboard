@@ -8,7 +8,7 @@ Scheduled mode fails closed when durable storage is unavailable or any requested
 
 ## Enable The Schedulers
 
-The workflow `.github/workflows/news-headline-collection.yml` captures headlines every two hours at minute 17. The existing `.github/workflows/news-research-cycle.yml` performs settled-label calibration at 23:30 UTC on weekdays, safely after 6:30 p.m. New York in both daylight and standard time. GitHub schedules execute only after the workflows are present on the default branch, and GitHub may delay cron jobs.
+The workflow `.github/workflows/news-headline-collection.yml` wakes hourly at minute 37, with a 90-minute freshness gate to target an approximately two-hour capture cadence. Only a complete run with usable headlines (new or already stored) can satisfy that gate. The existing `.github/workflows/news-research-cycle.yml` performs settled-label calibration at 23:30 UTC on weekdays, safely after 6:30 p.m. New York in both daylight and standard time. GitHub schedules execute only after the workflows are present on the default branch, and GitHub may delay or drop cron jobs.
 
 Configure these repository settings:
 
@@ -61,16 +61,57 @@ The `research_events` table records these event types:
 | Event | Meaning |
 | --- | --- |
 | `automation_run_started` | Immutable run ID, configuration, watchlist, and storage mode. |
-| `collection_completed` | Counts, provider errors, and the linked collection-run ID. |
+| `collection_completed` | Counts, provider errors, per-ticker fetch methods/fallback reasons, and the linked collection-run ID. |
 | `dataset_integrity_checkpoint` | Last accepted settled-label manifest and readiness state. |
 | `dataset_integrity_violation` | A decrease, removal, or direction flip that stopped calibration. |
 | `strategy_candidate_proposed` | New spec or new dataset vintage pending review. |
 | `strategy_candidate_unchanged` | Same spec and same dataset vintage as the last proposal. |
-| `automation_run_completed` | Terminal non-error status, including insufficient-data states. |
+| `automation_run_completed` | Terminal outcome, including data-health stops and insufficient-data states; inspect the payload status. |
 | `automation_run_failed` | Unexpected exception type and message; the exception is re-raised so the workflow fails visibly. |
 | `strategy_promotion_approved` / `strategy_promotion_rejected` | Explicit review decision. Each candidate can receive only one. |
 
-Expected early statuses such as `no_captured_headlines`, `insufficient_matured_data`, insufficient chronological rows, or insufficient validation/test sessions are successful no-candidate outcomes. `insufficient_matured_data` is the normal cold-start state before captured headlines have forward-return labels; a non-empty dataset that fails the feature-availability audit remains a distinct fail-closed result. These states are evidence that the guardrails are working, not reasons to loosen the split after seeing results.
+Expected early statuses such as `insufficient_matured_data`, insufficient chronological rows, or insufficient validation/test sessions are successful no-candidate outcomes. `insufficient_matured_data` is the normal cold-start state before captured headlines have forward-return labels; a non-empty dataset that fails the feature-availability audit remains a distinct fail-closed result. These states are evidence that the guardrails are working, not reasons to loosen the split after seeing results.
+
+`collection_incomplete`, `no_captured_headlines`, and `missing_benchmark_prices`
+are data-health failures: the research command exits non-zero, so execution-failure
+monitors see a failed job. A successful exit is not evidence of predictive value.
+
+## Empty News Responses And Recovery
+
+The fetch adapter tries `Ticker.news`, then `Search(...).news` if the primary
+response is empty, malformed, title-less, or raises. Search results must have
+a nonblank text title and an exact `relatedTickers` match. No paid key is needed.
+These tags establish provider association, not headline relevance or complete
+coverage; search can return a different selection of articles from ticker news.
+Both routes keep the `yfinance` provider identity and existing URL/content
+deduplication rules. The fetch route and fallback reason appear in per-ticker
+CLI diagnostics and in the research cycle's durable `collection_completed` event.
+
+If neither route yields usable headlines for a requested ticker, that ticker
+is a failed collection, even if the HTTP client raised no exception. Good
+tickers are still stored, but partial batches stop calibration and make both
+commands exit non-zero. An entirely duplicate, non-empty feed remains healthy:
+`inserted_versions=0` alone is not a failure. Legacy all-empty "success" rows
+no longer satisfy the freshness gate or count as complete collection weekdays
+in the readiness report. Historical rows are never rewritten.
+
+On 2026-10-27, a live check reproduced a JSON 404 from Yahoo's `/xhr/ncp`
+endpoint while yfinance 1.7.0 returned `[]`. The search route returned tagged
+headlines for all seven default symbols. The last productive run before the
+observed gap was [2026-10-01 16:42 UTC](https://github.com/fengabing0207-oss/thesisboard/actions/runs/36893786673)
+(70 fetched, 46 inserted); the next capture at
+[22:00 UTC](https://github.com/fengabing0207-oss/thesisboard/actions/runs/36932219486)
+returned zero. Inspection through the 2026-10-27 06:48 UTC run found 138 actual
+zero-yield collections, six freshness skips, and one failed run whose logs were
+unavailable. This establishes the observed outage window, not Yahoo's exact
+endpoint-change time. Upstream also reports the silent-404 failure in
+[yfinance issue #3004](https://github.com/ranaroussi/yfinance/issues/3004).
+
+After merging a provider repair, manually dispatch headline collection and
+confirm each ticker's usable counts and durable inserts; then dispatch the
+research cycle and inspect its status/readiness. Newly recovered articles must
+use the time actually observed, even when their publication date is old.
+Do not backdate `first_seen_at` or manufacture missing sessions to reach 25 days.
 
 `dataset_integrity_regressed` is different: the command exits non-zero and the
 workflow is red. Inspect its recorded violations before retrying. Do not delete

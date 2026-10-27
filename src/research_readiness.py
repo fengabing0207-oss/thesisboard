@@ -194,6 +194,8 @@ def build_research_readiness(
             and int(latest_run.get("successful_tickers", 0))
             == int(latest_run.get("requested_tickers", 0))
             and int(latest_run.get("failed_tickers", 0)) == 0
+            and not latest_run.get("errors")
+            and _accepted_headline_count(latest_run) > 0
         )
         checks.append(
             _check(
@@ -201,7 +203,8 @@ def build_research_readiness(
                 "pass" if complete else "fail",
                 (
                     f"{latest_run.get('successful_tickers', 0)}/"
-                    f"{latest_run.get('requested_tickers', 0)} tickers succeeded."
+                    f"{latest_run.get('requested_tickers', 0)} tickers reported success; "
+                    f"{_accepted_headline_count(latest_run)} usable headlines returned."
                 ),
             )
         )
@@ -330,6 +333,8 @@ def _complete_collection_weekdays(
             or int(run.get("successful_tickers", 0))
             != int(run.get("requested_tickers", 0))
             or int(run.get("failed_tickers", 0)) != 0
+            or run.get("errors")
+            or _accepted_headline_count(run) == 0
         ):
             continue
         try:
@@ -340,6 +345,12 @@ def _complete_collection_weekdays(
         if local_date.weekday() < 5:
             dates.add(local_date)
     return len(dates)
+
+
+def _accepted_headline_count(run: dict) -> int:
+    # Include duplicates: no new version can be legitimate, no usable feed is
+    # unverified. This also rejects legacy "successful" all-empty audit rows.
+    return int(run.get("inserted_versions", 0)) + int(run.get("existing_versions", 0))
 
 
 def _session_count(frame: pd.DataFrame) -> int:

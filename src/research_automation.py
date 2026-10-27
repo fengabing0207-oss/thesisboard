@@ -127,9 +127,7 @@ def run_research_cycle(
         if fetcher is not None:
             collection_kwargs["fetcher"] = fetcher
         collection = collect_ticker_news(symbols, **collection_kwargs)
-        collection_payload = {
-            key: value for key, value in collection.items() if key != "per_ticker"
-        }
+        collection_payload = dict(collection)
         collection_payload["errors"] = {
             ticker: _safe_error_message(message)
             for ticker, message in collection_payload.get("errors", {}).items()

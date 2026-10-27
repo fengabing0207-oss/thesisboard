@@ -4,7 +4,7 @@ import pytest
 
 import src.research_automation as automation
 from src.news_signal_lab import session_close_utc
-from src.news_store import ingest_news_items, list_research_events
+from src.news_store import ingest_news_items, list_research_events, list_news_items
 from src.price_provider import DemoPriceProvider
 from src.strategy_spec import StrategySpec
 
@@ -21,10 +21,19 @@ def _seed_store_and_prices(db_path, *, historical_price_bump=0.0):
     ingest_news_items(
         ticker="AAA",
         observed_at=observed,
-        items=[{"title": "Strong demand and record growth", "provider_item_id": "seed-1"}],
+        items=[{"title": "Strong demand and record growth", "link": "https://example.com/seed-1"}],
         db_path=db_path,
     )
     return DemoPriceProvider({"AAA": ticker, "SPY": benchmark})
+
+
+def _replay_captured_news(db_path, ticker):
+    """A healthy feed can return existing articles without adding model rows."""
+    return [
+        {"title": item["title"], "publisher": item["publisher"],
+         "link": item["canonical_url"], "providerPublishTime": item["published_at"]}
+        for item in list_news_items(db_path) if item["ticker"] == ticker
+    ]
 
 
 def _successful_policy():
@@ -80,7 +89,7 @@ def test_cycle_proposes_without_promoting_and_deduplicates_identical_vintage(
     kwargs = {
         "tickers": ["AAA"],
         "db_path": db_path,
-        "fetcher": lambda ticker: [],
+        "fetcher": lambda ticker: _replay_captured_news(db_path, ticker),
         "price_provider": provider,
         "now": "2026-09-17T16:00:00Z",
     }
@@ -114,7 +123,7 @@ def test_revised_price_input_creates_a_fresh_candidate_vintage(tmp_path, monkeyp
     first = automation.run_research_cycle(
         ["AAA"],
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=first_provider,
         now="2026-09-17T16:00:00Z",
         run_id="cycle-1",
@@ -123,7 +132,7 @@ def test_revised_price_input_creates_a_fresh_candidate_vintage(tmp_path, monkeyp
     revised = automation.run_research_cycle(
         ["AAA"],
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=revised_provider,
         now="2026-09-17T16:00:00Z",
         run_id="cycle-2",
@@ -150,7 +159,7 @@ def test_cycle_runs_real_walk_forward_selection_end_to_end(tmp_path):
                     if positive
                     else "Weak demand and loss warning"
                 ),
-                "provider_item_id": f"synthetic-{index}",
+                "link": f"https://example.com/synthetic-{index}",
                 "first_seen_at": session_close_utc(sessions[index])
                 - pd.Timedelta(minutes=30),
             }
@@ -175,7 +184,7 @@ def test_cycle_runs_real_walk_forward_selection_end_to_end(tmp_path):
             max_validation_selection_rate=0.6,
         ),
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=DemoPriceProvider({"DEMO": ticker, "SPY": benchmark}),
         now="2026-09-17T16:00:00Z",
         run_id="cycle-real-pipeline",
@@ -195,7 +204,7 @@ def test_promotion_is_manual_hash_checked_and_single_decision(tmp_path, monkeypa
     cycle = automation.run_research_cycle(
         ["AAA"],
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=provider,
         now="2026-09-17T16:00:00Z",
         run_id="cycle-1",
@@ -298,7 +307,7 @@ def test_cycle_logs_empty_bootstrap_as_insufficient_matured_data(
     result = automation.run_research_cycle(
         ["AAA"],
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=provider,
         now="2026-09-17T16:00:00Z",
         run_id="cycle-bootstrap",
@@ -329,7 +338,7 @@ def test_cycle_logs_unhandled_failure_without_swallowing_it(tmp_path, monkeypatc
         automation.run_research_cycle(
             ["AAA"],
             db_path=db_path,
-            fetcher=lambda ticker: [],
+            fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
             price_provider=FailingPriceProvider(),
             now="2026-09-17T16:00:00Z",
             run_id="cycle-price-failure",
@@ -364,7 +373,7 @@ def test_cycle_fails_closed_when_settled_sessions_disappear(tmp_path, monkeypatc
     first = automation.run_research_cycle(
         ["AAA"],
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=provider,
         now="2026-09-17T16:00:00Z",
         run_id="cycle-integrity-baseline",
@@ -391,7 +400,7 @@ def test_cycle_fails_closed_when_settled_sessions_disappear(tmp_path, monkeypatc
     regressed = automation.run_research_cycle(
         ["AAA"],
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=provider,
         now="2026-09-18T16:00:00Z",
         run_id="cycle-integrity-regressed",
@@ -418,7 +427,7 @@ def test_cycle_fails_closed_when_a_settled_label_flips(tmp_path, monkeypatch):
     automation.run_research_cycle(
         ["AAA"],
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=provider,
         now="2026-09-17T16:00:00Z",
         run_id="cycle-label-baseline",
@@ -439,7 +448,7 @@ def test_cycle_fails_closed_when_a_settled_label_flips(tmp_path, monkeypatch):
     result = automation.run_research_cycle(
         ["AAA"],
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=provider,
         now="2026-09-18T16:00:00Z",
         run_id="cycle-label-flipped",
@@ -461,7 +470,7 @@ def test_integrity_checkpoint_is_scoped_to_the_research_contract(
     first = automation.run_research_cycle(
         ["AAA"],
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=provider,
         now="2026-09-17T16:00:00Z",
         run_id="cycle-one-day-horizon",
@@ -470,7 +479,7 @@ def test_integrity_checkpoint_is_scoped_to_the_research_contract(
         ["AAA"],
         config=automation.ResearchCycleConfig(horizon_days=3),
         db_path=db_path,
-        fetcher=lambda ticker: [],
+        fetcher=lambda ticker: _replay_captured_news(db_path, ticker),
         price_provider=provider,
         now="2026-09-18T16:00:00Z",
         run_id="cycle-three-day-horizon",
@@ -479,3 +488,35 @@ def test_integrity_checkpoint_is_scoped_to_the_research_contract(
     assert first["dataset_integrity"]["status"] == "baseline_created"
     assert changed_contract["dataset_integrity"]["status"] == "baseline_created"
     assert changed_contract["status"] == "candidate_proposed"
+
+
+def test_empty_collection_blocks_models_even_with_existing_history(tmp_path, monkeypatch):
+    db_path = tmp_path / "news.db"
+    provider = _seed_store_and_prices(db_path)
+    before = list_news_items(db_path)
+    monkeypatch.setattr(automation, "compare_walk_forward_models",
+                        lambda *a, **k: pytest.fail("must stop before model evaluation"))
+    result = automation.run_research_cycle(
+        ["AAA"], db_path=db_path, fetcher=lambda ticker: [], price_provider=provider,
+        now="2026-10-27T12:00:00Z", run_id="cycle-empty-provider",
+    )
+    assert result["status"] == "collection_incomplete"
+    assert result["candidate_event_id"] is None
+    assert result["collection"]["successful_tickers"] == 0
+    assert list_news_items(db_path) == before
+    event = list_research_events(db_path, event_type="collection_completed")[0]
+    assert event["payload"]["per_ticker"]["AAA"]["status"] == "failed"
+
+
+@pytest.mark.parametrize("status, expected_exit", [
+    ("collection_incomplete", 1), ("no_captured_headlines", 1),
+    ("missing_benchmark_prices", 1), ("dataset_integrity_regressed", 1),
+    ("failed", 1), ("insufficient_matured_data", 0), ("model_run_incomplete", 0),
+])
+def test_research_cli_fails_for_data_health_but_not_normal_warmup(monkeypatch, status, expected_exit):
+    import scripts.run_research_cycle as cli
+
+    monkeypatch.setattr("sys.argv", ["run_research_cycle", "AAA"])
+    monkeypatch.setattr(cli, "storage_backend_info", lambda: {})
+    monkeypatch.setattr(cli, "run_research_cycle", lambda *a, **k: {"status": status})
+    assert cli.main() == expected_exit
